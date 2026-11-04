@@ -18,6 +18,10 @@ oa
 oa do "find every TODO in src/ and write them to todos.txt"
 ```
 
+Proof? Here you go, HP-UX on 32-bit PA-RISC
+<img width="1280" height="1024" alt="hpux" src="https://github.com/user-attachments/assets/d2942ed2-625c-4e3b-9108-7521d82531bc" />
+
+
 ## why perl, and not C
 
 C would need libssl headers that a 2000-era box does not have, and building
