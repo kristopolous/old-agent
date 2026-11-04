@@ -1,4 +1,7 @@
-# oldagent
+<p align="center">
+<img width="640" height="360" alt="oa" src="https://github.com/user-attachments/assets/9afd0382-65dd-46ec-b1a8-ca849b84a92b" />
+
+</p>
 
 A tiny agent for machines that time forgot.
 
