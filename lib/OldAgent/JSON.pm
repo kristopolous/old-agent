@@ -297,5 +297,40 @@ sub decode_lenient {
     return ($val, undef) unless $err;
     return (undef, $err);
 }
+# Some endpoints (notably qwen/ollama with thinking models) return NDJSON --
+# a series of JSON objects one per line, even when stream:false is requested.
+# parse_ndjson decodes each line and concatenates message.content so the
+# caller gets the full reply.  For a single object it behaves like decode.
+sub parse_ndjson {
+    my ($text) = @_;
+    return (undef, 'empty input') unless defined $text && length $text;
+    my @lines = split(/\n+/, $text, -1);
+    my ($last, $content, $count) = (undef, '', 0);
+    for my $line (@lines) {
+        next if $line =~ /^\s*$/;
+        next unless $line =~ /^\s*[\{\[]/;
+        my ($o, $e) = decode_lenient($line);
+        next if $e || ref($o) ne 'HASH';
+        $last = $o;
+        $count++;
+        my $c = (ref $o->{message} eq 'HASH' && defined $o->{message}{content})
+              ? $o->{message}{content} : undef;
+        # thinking models (deepseek-r1, qwen3) may put the reply in `thinking`
+        # with content empty; fall back so the text is not lost.
+        if (!defined $c && ref $o->{message} eq 'HASH' && defined $o->{message}{thinking}) {
+            $c = $o->{message}{thinking};
+        }
+        $content .= $c if defined $c;
+    }
+    return (undef, 'no JSON objects found') unless $count;
+    return ($last, undef) if $count == 1;
+    if (ref $last->{message} eq 'HASH') {
+        $last->{message}{content} = $content;
+    } else {
+        $last->{message} = { role => 'assistant', content => $content };
+    }
+    $last->{_oa_content} = $content;
+    return ($last, undef);
+}
 
 1;

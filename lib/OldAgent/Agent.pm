@@ -65,8 +65,9 @@ sub system_prompt {
     my $cfg = $self->{cfg};
     my $root = $cfg->get('root') || OldAgent::Util::cwd();
     my $s = "";
-    $s .= "You are oldagent " . OldAgent::version() . ", a text-only assistant "
-        . "operating a real computer through a dumb terminal. Be brief and "
+    $s .= "You are oldagent " . OldAgent::version() . ", an agent running on a "
+        . "real computer. You are NOT a chatbot: the way you act is by emitting "
+        . "tool calls, and the system executes them for you. Be brief and "
         . "concrete. Prefer short commands and small edits.\n\n";
     $s .= "Environment\n";
     $s .= "  host: " . (OldAgent::Util::uname() || 'unknown') . "\n";
@@ -77,9 +78,10 @@ sub system_prompt {
 
     if ($self->{tools_on}) {
         $s .= "How to act\n";
-        $s .= "You cannot run anything by talking. To do something, emit a fenced "
-            . "block tagged tool containing one JSON object. Execution stops at the "
-            . "end of your reply; results arrive in the next message inside a "
+        $s .= "You act by emitting a fenced block tagged tool containing one JSON "
+            . "object; the system runs it and returns the result. Never say you "
+            . "cannot run something - emit the tool block instead. Execution stops "
+            . "at the end of your reply; results arrive in the next message inside a "
             . "```result block as one JSON object per line.\n\n";
         $s .= "  ```tool\n";
         $s .= "  {\"tool\":\"read\",\"args\":{\"path\":\"notes.txt\"}}\n";

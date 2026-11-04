@@ -103,7 +103,7 @@ sub _post {
         timeout => $self->{timeout},
         backend => $self->{backend},
     );
-    $self->{last_meta} = { % %{ $self->{last_meta} },
+    $self->{last_meta} = { %{ $self->{last_meta} },
                            http => $r->{status}, transport => $r->{backend} };
     if ($r->{error} && !$r->{status}) {
         return (undef, "request to $url failed: $r->{error} (via $r->{backend})");
@@ -112,10 +112,13 @@ sub _post {
         my $detail = OldAgent::Util::clip(OldAgent::Util::one_line($r->{body}), 600);
         return (undef, "http $r->{status} from $url: $detail");
     }
-    my ($data, $err) = OldAgent::JSON::decode($r->{body});
+    my ($data, $err) = OldAgent::JSON::parse_ndjson($r->{body});
     if ($err) {
-        return (undef, 'model reply was not valid JSON: ' . $err . ' :: '
-                     . OldAgent::Util::clip($r->{body}, 400));
+        ($data, $err) = OldAgent::JSON::decode($r->{body});
+        if ($err) {
+            return (undef, 'model reply was not valid JSON: ' . $err . ' :: '
+                         . OldAgent::Util::clip($r->{body}, 400));
+        }
     }
     return ($data, undef);
 }
@@ -174,6 +177,11 @@ sub _ollama {
     $options{temperature} = OldAgent::JSON::num($t) if defined $t && length $t;
     my $mt = $self->{cfg}->get('max_tokens');
     $options{num_predict} = OldAgent::JSON::num($mt) if defined $mt && length $mt;
+    # thinking models (qwen3 etc.) honour options.think; most others ignore
+    # it, so it is safe to always send for the ollama dialect.  Default is
+    # off: thinking burns the token budget and often empties the reply.
+    my $think = $self->{cfg}->get('thinking');
+    $options{think} = OldAgent::JSON::num(defined $think && $think eq '1' ? 1 : 0);
     my %payload = (
         model    => $self->{cfg}->get('model'),
         system   => $a{system},
@@ -190,6 +198,9 @@ sub _ollama {
         return (undef, 'ollama error: ' . $data->{error});
     }
     my $text = ref($data->{message}) eq 'HASH' ? $data->{message}{response} : undef;
+    if (!defined $text && ref($data->{message}) eq 'HASH') {
+        $text = $data->{message}{content};   # newer ollama builds use content
+    }
     $text = $data->{response} unless defined $text;
     return (defined $text ? "$text" : '', undef);
 }
@@ -229,7 +240,7 @@ sub _exec {
     my $r = OldAgent::Util::run_cmd(
         cmd => $cmd, timeout => $self->{timeout}, stdin => $transcript,
     );
-    $self->{last_meta} = { % %{ $self->{last_meta} }, exit => $r->{exit} };
+    $self->{last_meta} = { %{ $self->{last_meta} }, exit => $r->{exit} };
     if ($r->{killed}) {
         return (undef, "exec provider timed out after $self->{timeout}s");
     }

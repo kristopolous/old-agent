@@ -16,7 +16,7 @@ my %ARGS = (
     edit  => 'path find replace [all]',
     list  => 'path [glob] [limit]',
     find  => 'pattern [path] [glob] [limit]',
-    bash  => 'cmd [timeout]',
+    bash  => 'command [timeout]',
     done  => 'summary',
 );
 

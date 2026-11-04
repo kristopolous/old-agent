@@ -3,6 +3,7 @@
 use strict;
 use warnings;
 use Test::More;
+plan tests => 10;  # declared up-front (5.008 Test::More wants it before the first test)
 use lib 'lib';
 use OldAgent::Config ();
 use OldAgent::Term ();
@@ -64,4 +65,3 @@ is_deeply([ @{ $t3->{history} } ], [], 'missing file means empty history');
 # cleanup
 unlink("$dir/history", "$dir/rc", "$dir/none");
 rmdir($dir);
-done_testing();

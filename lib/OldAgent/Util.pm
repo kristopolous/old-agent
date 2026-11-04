@@ -214,7 +214,7 @@ sub run_cmd {
     alarm($timeout > 0 ? $timeout : 0);
     waitpid($pid, 0);
     alarm(0);
-    $SIG{ALRM} = $old_alarm;
+    $SIG{ALRM} = $old_alarm if defined $old_alarm;
 
     my ($data, $err) = slurp($outf);
     unlink($outf);
@@ -229,7 +229,7 @@ sub run_cmd {
         exit   => $code,
         signal => $sig,
         killed => $killed,
-        error  => $err,
+        error  => defined $err ? $err : '',
     };
 }
 
@@ -277,7 +277,7 @@ sub capture {
     close(OA_OUT); close(OA_ERR);
     waitpid($pid, 0);
     alarm(0);
-    $SIG{ALRM} = $old_alarm;
+    $SIG{ALRM} = $old_alarm if defined $old_alarm;
     unlink($inf) if defined $inf;
 
     my $raw = $?;

@@ -15,6 +15,7 @@ my %DEFAULT = (
     key_env      => '',
     temperature  => '',
     max_tokens   => '1024',
+    thinking     => '0',         # thinking models: 1 = allow reasoning, 0 = off
     timeout      => '120',
     http         => 'auto',
     tools        => '1',

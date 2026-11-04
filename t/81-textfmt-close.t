@@ -7,6 +7,7 @@
 use strict;
 use warnings;
 use Test::More;
+plan tests => 8;   # declared up-front (5.008 Test::More wants it before the first test)
 use FindBin;
 use lib "$FindBin::RealBin/../lib";
 use OldAgent::Textfmt ();
@@ -49,4 +50,3 @@ use OldAgent::Textfmt ();
     is(OldAgent::Textfmt::ansify($m, 0), $m, 'off is a no-op');
 }
 
-done_testing();

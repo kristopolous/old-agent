@@ -15,6 +15,9 @@ use File::Find ();
 use File::Spec ();
 
 my @RULES = (
+    [qr/GetOptionsFromArray/,  'GetOptionsFromArray is 5.010+',      1],
+    [qr/done_testing\s*\(/,    'Test::More::done_testing is 5.011+',  1],
+    [qr/%[ \t]+%\{/,           'stray % before %{ deref (5.008 parse error)', 1],
     [qr/\bsay\s/,              'say() is 5.010+',                    1],
     [qr/\bstate\s+\w/,         'state variables are 5.010+',         1],
     [qr/\/\/(?!=)/,            'defined-or // is 5.010+',            1],
@@ -64,7 +67,10 @@ my @files;
 File::Find::find({
     wanted => sub {
         return unless -f $_;
-        return if $File::Find::dir =~ m{(?:^|/)(?:\.git|blib|tmp)$};
+        # skip build-artifact dirs in the project tree (blib, .git)
+        return if $File::Find::dir =~ m{(^|/)(?:\.git|blib)(?:/|$)};
+        # skip project-root tmp/ but NOT the system /tmp/ (absolute)
+        return if $File::Find::dir !~ m{^/} && $File::Find::dir =~ m{^tmp/};
         return unless /\.(pm|pl|t)$/ || $_ eq 'oa';
         return if $File::Find::name =~ /compat-lint\.pl$/;   # the linter is not linted
         push @files, $File::Find::name;

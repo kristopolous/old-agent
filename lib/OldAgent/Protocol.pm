@@ -17,6 +17,40 @@ use OldAgent::JSON ();
 
 my %TAGS = (tool => 1, oldagent => 1, oa => 1, json => 1, '' => 1);
 
+# Recognise a model's *own* tool-call markup (qwen thinking models emit
+# `<|tool_call>call:NAME{...}<tool_call|>` and refuse to use our fence).
+# The body between the braces may be strict JSON or a loose {key: val, ...}.
+sub _native_calls {
+    my ($text) = @_;
+    my @out;
+    while ($text =~ /<\|tool_call\s*>\s*call:(\w+)\s*\{(.*?)\}\s*<\s*tool_call\|>/gs) {
+        my ($name, $body) = (lc($1), $2);
+        my %args;
+        my ($v, $e) = OldAgent::JSON::decode_lenient($body);
+        if (!defined $e && ref($v) eq 'HASH') {
+            %args = %$v;
+        } else {
+            # loose form: key: "value" or key: bareword, comma separated
+            while ($body =~ /([A-Za-z_]\w*)\s*:\s*"((?:[^"\\]|\\.)*)"/g) {
+                my ($k, $val) = ($1, $2);
+                $val =~ s/\\(.)/$1/ge;
+                $args{$k} = $val;
+            }
+            for my $pair (split /,/, $body) {
+                next if $pair =~ /"/;
+                if ($pair =~ /([A-Za-z_]\w*)\s*:\s*(.+)$/) {
+                    my ($k, $val) = ($1, $2);
+                    $val =~ s/^\s+//; $val =~ s/\s+$//;
+                    $val = $val + 0 if $val =~ /^-?[0-9]+$/;
+                    $args{$k} = $val;
+                }
+            }
+        }
+        push @out, { tool => $name, args => \%args, raw => { native => $name } };
+    }
+    return @out;
+}
+
 sub parse {
     my ($text) = @_;
     my @calls;
@@ -49,6 +83,11 @@ sub parse {
         push @calls, $c;
     }
 
+    # native tool-call markup: some models (qwen thinking models) ignore the
+    # fence protocol entirely and emit their own form:
+    #   <|tool_call>call:bash{command: "echo hi"}<tool_call|>
+    push @calls, _native_calls($text);
+
     my %seen;
     my @uniq;
     for my $c (@calls) {
@@ -62,7 +101,7 @@ sub parse {
 sub _normalize {
     my ($h) = @_;
     my %c = (tool => undef, args => {}, raw => $h);
-    for my $k ('tool', 'name', 'action', 'command') {
+    for my $k ('tool', 'name', 'action', 'function', 'fn') {
         if (defined $h->{$k} && !ref $h->{$k}) {
             $c{tool} = lc("$h->{$k}");
             last;
@@ -73,17 +112,41 @@ sub _normalize {
             $c{args} = $h->{$k};
             last;
         }
+        if (defined $h->{$k} && !ref $h->{$k} && length $h->{$k}) {
+            # arguments given as a JSON string (openai style)
+            my ($a, $ae) = OldAgent::JSON::decode_lenient($h->{$k});
+            if (!$ae && ref($a) eq 'HASH') { $c{args} = $a; last }
+        }
+    }
+    # OpenAI native function calling: {"function": {"name": "bash",
+    # "arguments": "..."}}. arguments may be a JSON string or a hash.
+    if (ref($h->{function}) eq 'HASH') {
+        my $f = $h->{function};
+        $c{tool} = lc($f->{name}) if !length $c{tool} && defined $f->{name};
+        if (!ref($c{args}) || !keys %{$c{args}}) {
+            if (ref($f->{arguments}) eq 'HASH') {
+                $c{args} = $f->{arguments};
+            } elsif (defined $f->{arguments}) {
+                my ($a, $ae) = OldAgent::JSON::decode_lenient($f->{arguments});
+                $c{args} = $a if !$ae && ref($a) eq 'HASH';
+            }
+        }
     }
     if (!ref($c{args}) || keys %{$c{args}} == 0) {
         # flat form: {"tool":"read","path":"x"}
         my %flat;
         for my $k (keys %$h) {
-            next if $k =~ /^(?:tool|name|action|command|args|arguments|input|params|parameters)$/;
+            next if $k =~ /^(?:tool|name|action|function|fn|args|arguments|input|params|parameters)$/;
             $flat{$k} = $h->{$k};
         }
         $c{args} = \%flat if !keys %{ $c{args} } && %flat;
     }
     $c{tool} = '' unless defined $c{tool};
+    # a bare {"command": "..."} with no tool name is almost always bash
+    if (!length $c{tool} && defined $h->{command} && !ref $h->{command}) {
+        $c{tool} = 'bash';
+        $c{args} = { command => $h->{command} };
+    }
     return \%c;
 }
 
