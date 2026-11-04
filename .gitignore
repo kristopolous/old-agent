@@ -1,1 +1,4 @@
 typescript
+
+# release tarballs live on the github releases page
+*.tgz
