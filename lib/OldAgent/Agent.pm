@@ -27,6 +27,7 @@ sub new {
                           timeout    => 30,
                       ),
         provider  => $a{provider} || OldAgent::Provider->new(config => $cfg),
+        formatter => $a{formatter},          # optional: sub(visible_text) -> rendered
         history   => [],
         out       => $a{out} || \*STDOUT,
         approve   => $a{approve},          # code ref or undef
@@ -175,7 +176,10 @@ sub _loop {
         $last = $reply;
 
         my $shown = _strip_blocks($reply);
-        $self->emit($shown) if length OldAgent::Util::strip($shown);
+        if (length OldAgent::Util::strip($shown)) {
+            $shown = $self->{formatter}->($shown) if ref($self->{formatter}) eq 'CODE';
+            $self->emit($shown);
+        }
 
         last unless $self->{tools_on};
         my $calls = OldAgent::Protocol::parse($reply);

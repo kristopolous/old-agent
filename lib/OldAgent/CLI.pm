@@ -16,6 +16,17 @@ use OldAgent::Tools ();
 use OldAgent::Agent ();
 use OldAgent::Doctor ();
 use OldAgent::JSON ();
+use OldAgent::Textfmt ();
+
+# Render a model's visible reply with markdown-lite colours, but only when it
+# is going to a real terminal and the user did not ask for quiet output.  The
+# hook stays in the presentation layer: the Agent itself always emits plain
+# text, and the tool/error lines never pass through it.
+sub _md_formatter {
+    my ($a) = @_;
+    return undef if $a->{quiet} || !-t STDOUT;
+    return sub { OldAgent::Textfmt::ansify($_[0], 1) };
+}
 
 my %FLAGS = (
     'provider=s'   => 'provider',
@@ -109,7 +120,7 @@ sub run {
         return 2;
     }
     return $fn->(
-        config => $cfg, argv => \@argv, quiet => $quiet,
+        command => $cmd, config => $cfg, argv => \@argv, quiet => $quiet,
         files  => \@files, verbose => $verbose,
     );
 }
@@ -124,10 +135,9 @@ sub cmd_ask {
     return _usage() unless length $text;
     my $cfg = $a{config};
     $cfg->set(tools => 0);
-    my $agent = OldAgent::Agent->new(config => $cfg, quiet => $a{quiet});
+    my $agent = OldAgent::Agent->new(config => $cfg, quiet => $a{quiet}, formatter => _md_formatter(\%a));
     my ($reply, $err) = $agent->ask($text);
     if ($err) { print STDERR "oldagent: $err\n"; return 1 }
-    print "$reply\n" unless $a{quiet};
     return 0;
 }
 
@@ -139,27 +149,26 @@ sub cmd_do {
     return _usage() unless length $text;
     my $cfg = $a{config};
     $cfg->set(tools => 1);
-    my $agent = OldAgent::Agent->new(config => $cfg, quiet => $a{quiet});
+    my $agent = OldAgent::Agent->new(config => $cfg, quiet => $a{quiet}, formatter => _md_formatter(\%a));
     my ($reply, $err) = $agent->ask($text);
     if ($err) { print STDERR "oldagent: $err\n"; return 1 }
-    my $shown = OldAgent::Agent::_strip_blocks($reply);
-    print OldAgent::Util::strip($shown) . "\n" if length OldAgent::Util::strip($shown);
     return 0;
 }
 
 sub cmd_chat {
     my (%a) = @_;
     my $cfg = $a{config};
-    my $agent = OldAgent::Agent->new(config => $cfg);
+    my $agent = OldAgent::Agent->new(config => $cfg, formatter => _md_formatter(\%a));
     my $first = join(' ', @{ $a{argv} });
     if (length $first) {
         $first = _attach_files($a{files}, $first);
         my ($reply, $err) = $agent->ask($first);
         if ($err) { print STDERR "oldagent: $err\n"; return 1 }
-        my $shown = OldAgent::Agent::_strip_blocks($reply);
-        print OldAgent::Util::strip($shown) . "\n" if length OldAgent::Util::strip($shown);
         return 0 unless -t STDIN;
     }
+    # 'oa repl' asks for the session explicitly, so honor it even when
+    # stdin is a pipe (scripts, tests, tmux, a dumb screen)
+    return 0 unless -t STDIN || ($a{command} || '') eq 'repl';
     return repl(agent => $agent, config => $cfg);
 }
 
@@ -221,13 +230,17 @@ sub cmd_help { print _usage(); return 0 }
 sub cmd_version { print "oldagent " . OldAgent::version() . " (perl $])\n"; return 0 }
 
 sub cmd_desktop {
-    print "oa desktop is not built yet.\n\n";
-    print "the plan is a Tk front end (a Text widget, an input line, a run\n";
-    print "button) on top of the same OldAgent::Agent loop this terminal uses.\n";
-    print "Tk is not part of core perl, so it stays optional and off the\n";
-    print "critical path; the terminal interface needs nothing you lack.\n\n";
-    print "for now: oa            interactive session\n";
-    print "       oa do \"task\"   one shot, with tools\n";
+    my (%a) = @_;
+    my $cfg = $a{config};
+    eval {
+        require OldAgent::Desktop;
+        my $app = OldAgent::Desktop->new(config => $cfg);
+        $app->main_loop();
+    };
+    if ($@) {
+        print STDERR "oldagent: desktop error: $@\n";
+        return 1;
+    }
     return 0;
 }
 
@@ -237,14 +250,36 @@ sub repl {
     my (%a) = @_;
     my $agent  = $a{agent};
     my $cfg    = $a{config};
-    my $term = eval { require Term::ReadLine; Term::ReadLine->new('oldagent') };
+    # Pick the best line editor:
+    #  - the real C readline (Term::ReadLine::Gnu / ::EditLine) if installed
+    #  - our own wrapping editor (OldAgent::Term) on a tty
+    #  - plain stdin when piped
+    # Note: the Term::ReadLine *stub* backend reads /dev/tty, so it is
+    # useless for piped input; skip it on purpose.
+    my $term;
+    my $edit = 'plain stdin (no line editing here)';
+    my $cimpl = '';
+    eval { require Term::ReadLine; $cimpl = $Term::ReadLine::IMPLEMENTATION || '' };
+    if ($cimpl eq 'Gnu' || $cimpl eq 'EditLine') {
+        $term = eval { Term::ReadLine->new('oldagent') };
+        eval { $term->History(200); 1 } if $term;
+        $edit = "readline ($cimpl): history, editing, wrap";
+    } elsif (-t STDIN && open(my $probe, '<', '/dev/tty')) {
+        close $probe;
+        require OldAgent::Term;
+        my $own = OldAgent::Term->new();
+        if ($own) {
+            $term = $own;
+            $edit = 'built-in editor: up/down = history, arrows/edit keys, wrap';
+        }
+    }
 
     if (!$a{quiet_intro}) {
         print "oldagent " . OldAgent::version() . " - perl $], " . OldAgent::Util::uname() . "\n";
         printf "%s / %s / %s\n",
             $cfg->get('provider'), $cfg->get('base_url'), $cfg->get('model');
-        printf "tools %s, bash approval %s. type /help for commands, /quit to leave.\n",
-            $cfg->get('tools') ? 'on' : 'off', $cfg->get('approve');
+        printf "tools %s, bash approval %s. %s. type /help for commands, /quit to leave.\n",
+            $cfg->get('tools') ? 'on' : 'off', $cfg->get('approve'), $edit;
     }
 
     while (1) {
@@ -253,7 +288,7 @@ sub repl {
         $line =~ s/\s+$//;
         next unless length $line;
 
-        if ($line =~ m{^/(\w+)\s*(.*)$}) {
+        if ($line =~ m{^/([\w-]+)\s*(.*)$}) {
             my ($c, $rest) = ($1, $2);
             my $r = repl_command($c, $rest, agent => $agent, config => $cfg, term => $term);
             last if $r && $r eq 'quit';
@@ -314,9 +349,32 @@ sub repl_command {
         else    { print "model = " . $cfg->get('model') . "\n" }
         return;
     }
-    if ($c eq 'provider') {
-        if (@r) { $cfg->set(provider => $r[0]); print "provider = $r[0]\n" }
-        else    { print "provider = " . $cfg->get('provider') . " (" . $cfg->get('base_url') . ")\n" }
+    if ($c eq 'provider' || $c eq 'base-url' || $c eq 'url') {
+        if ($c ne 'provider') {
+            if (@r) { $cfg->set(base_url => $r[0]); print "base_url = $r[0]\n" }
+            else   { print "base_url = " . $cfg->get('base_url') . "\n" }
+            return;
+        }
+        if (@r) {
+            my $arg = $r[0];
+            if ($arg =~ /^(openai(-compat)?|ollama|anthropic|exec|echo)$/) {
+                $cfg->set(provider => $arg);
+                print "provider = $arg (base_url = " . $cfg->get('base_url') . ")\n";
+            } elsif (_looks_like_url($arg)) {
+                my $u = $arg;
+                $u = "http://$u" unless $u =~ m{^https?://};
+                my $p = _infer_provider($u);
+                $cfg->set(base_url => $u);
+                $cfg->set(provider => $p) if $p ne $cfg->get('provider');
+                print "provider = " . $cfg->get('provider')
+                    . ", base_url = $u\n";
+            } else {
+                print "not a known provider (openai, openai-compat, ollama, anthropic, exec, echo)\n";
+                print "  and not a url. try:  /provider http://host:port/v1\n";
+            }
+        } else {
+            print "provider = " . $cfg->get('provider') . " (" . $cfg->get('base_url') . ")\n";
+        }
         return;
     }
     if ($c eq 'turns') {
@@ -390,6 +448,21 @@ sub repl_command {
 
 # --------------------------------------------------------------- helpers --
 
+sub _looks_like_url {
+    my ($u) = @_;
+    return 1 if $u =~ m{^https?://};
+    return 1 if $u =~ m{^[\w.-]+:\d+(?:/|$)};        # host:port[/path]
+    return 1 if $u =~ m{^[\w.-]*\.[\w.-]+(?:/|$)} && $u !~ m{^gpt-} && $u !~ m{^claude-};
+    return 0;
+}
+
+sub _infer_provider {
+    my ($u) = @_;
+    return 'anthropic' if $u =~ m{anthropic};
+    return 'ollama'    if $u =~ m{ollama|11434};
+    return 'openai-compat';
+}
+
 sub _attach_files {
     my ($files, $text) = @_;
     return $text unless $files && @$files;
@@ -422,7 +495,7 @@ commands
   models          list models the endpoint knows
   tools           show the tool list the model sees
   config [init]   show settings / write an oldagentrc
-  desktop         Tk front end (not built yet)
+  desktop         Tk front end (needs the Tk perl module)
   help, version
 
 flags
@@ -459,7 +532,8 @@ sub _repl_help {
   /undo            drop the last exchange
   /history         what is in context
   /model [NAME]    show or set the model
-  /provider [NAME] show or set the provider
+  /provider [X]    show, or set the provider (name or url: /provider http://host:11434/v1)
+  /base-url [URL]  show or set the endpoint url
   /turns [N]       how many tool round trips per message
   /tools [on|off]  show tools, or switch them
   /yes  /no        run bash without asking / ask first

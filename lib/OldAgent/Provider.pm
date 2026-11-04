@@ -46,7 +46,9 @@ sub chat {
     elsif ($kind eq 'exec')                               { ($text, $err) = $self->_exec(%a) }
     elsif ($kind eq 'echo')                               { ($text, $err) = $self->_echo(%a) }
     else {
-        return (undef, "unknown provider '$kind' (openai, ollama, anthropic, exec, echo)");
+        my $hint = $kind =~ m{^https?://}
+            ? " -- that looks like a url; use /base-url instead" : '';
+        return (undef, "unknown provider '$kind' (openai, ollama, anthropic, exec, echo)$hint");
     }
     $self->{last_meta} = { provider => $kind, error => $err };
     return ($text, $err);
@@ -148,6 +150,13 @@ sub _openai {
     my $text = ref($msg) eq 'HASH' ? $msg->{content} : undef;
     if (!defined $text) {
         $text = $ch->[0]{text};
+    }
+    if (!defined $text || !length $text) {
+        my $reason = ref($msg) eq 'HASH' ? ($msg->{reasoning_content} || '') : '';
+        if (length $reason) {
+            return (undef, 'the model spent its whole token budget thinking and '
+                            . 'produced no reply - raise --max-tokens');
+        }
     }
     if (ref($data->{usage}) eq 'HASH') {
         $self->{last_meta}{usage} = $data->{usage};

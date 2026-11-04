@@ -168,6 +168,9 @@ sub set {
     my ($self, $k, $v) = @_;
     $self->{v}{$k} = $v;
     $self->{set}{$k} = 1;
+    # base_url and provider drive the derived flags (e.g. ollama's /v1 means
+    # "speak the OpenAI dialect"); re-derive so a runtime change takes effect
+    $self->finalize if $k eq 'base_url' || $k eq 'provider' || $k eq 'model';
     return $self;
 }
 sub all { my ($self) = @_; return { %{ $self->{v} } } }

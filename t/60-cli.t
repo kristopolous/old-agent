@@ -5,7 +5,7 @@ use Test::More;
 use File::Spec ();
 use OldAgent::Util;
 
-plan tests => 19;
+plan tests => 25;
 
 my $perl = $^X;
 my $oa   = File::Spec->catfile('oa');
@@ -51,8 +51,9 @@ like($out, qr/doctor/, 'help lists doctor');
 isnt($rc, 0, 'unknown command fails');
 like($out, qr/unknown command/, 'and says so');
 
-($rc, $out) = run(argv => ['desktop']);
-like($out, qr/not built yet/, 'desktop is honest about not existing');
+($rc, $out) = run(argv => ['desktop'], env => { DISPLAY => '' });
+like($out, qr/desktop error|couldn.t connect|Tk/i,
+     'desktop needs Tk/a display, and says so');
 
 ($rc, $out) = run(argv => ['tools']);
 like($out, qr/"tool":"bash"/, 'tools shows the tool spec');
@@ -66,6 +67,40 @@ like($out, qr/^provider/m, 'config shows provider');
 );
 is($rc, 0, 'ask exits 0');
 like($out, qr/\(echo\) you said: hello there/, 'echo model answered');
+
+# --- the interactive session, piped (scripts, tmux, tests) -------------
+my $repl_in = File::Spec->catfile($dir, 'repl.txt');
+
+OldAgent::Util::spew($repl_in, "/provider https://9ol.es/11434\n/provider\n/quit\n");
+($rc, $out) = run(
+    argv => ['--no-config', '--provider', 'echo', 'repl'],
+    stdin_file => $repl_in,
+);
+is($rc, 0, 'piped repl exits 0');
+like($out, qr/provider = ollama, base_url = https:\/\/9ol\.es\/11434/,
+     '/provider <url> infers the provider from the url');
+like($out, qr/provider = ollama \(https:\/\/9ol\.es\/11434\)/,
+     'and /provider shows the new state');
+
+OldAgent::Util::spew($repl_in, "hello from a pipe\n/quit\n");
+($rc, $out) = run(
+    argv => ['--no-config', '--provider', 'echo', 'repl'],
+    stdin_file => $repl_in,
+);
+like($out, qr/\(echo\) you said: hello from a pipe/, 'piped message got answered');
+
+OldAgent::Util::spew($repl_in, join("\n",
+    '/provider gpt-4',
+    '/base-url http://127.0.0.1:9999/v1',
+    '/base-url',
+    '/quit',
+) . "\n");
+($rc, $out) = run(
+    argv => ['--no-config', '--provider', 'echo', 'repl'],
+    stdin_file => $repl_in,
+);
+like($out, qr/not a known provider/, 'rejects a provider that is neither name nor url');
+like($out, qr/base_url = http:\/\/127\.0\.0\.1:9999\/v1/, '/base-url sets and shows');
 
 # --- a full task, tools and all ---------------------------------------
 my $script = File::Spec->catfile($dir, 'script.txt');

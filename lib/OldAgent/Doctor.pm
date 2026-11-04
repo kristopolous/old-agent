@@ -64,14 +64,17 @@ sub report {
     push @lines, '== optional niceties ==';
     for my $t (['curl', 'https + redirects'], ['wget', 'fallback downloader'],
                ['bash', 'shell for the bash tool'], ['sh', 'minimum shell'],
-               ['tk', 'Tk frontend (not built yet)'], ['wish', 'Tk frontend (not built yet)']) {
+               ['tk', 'Tk binary (optional)'], ['wish', 'Tk binary (optional)']) {
         my $w = OldAgent::Util::which($t->[0]);
         push @lines, sprintf('  %-9s %-28s %s', $t->[0], $t->[1], $w ? $w : '-');
     }
-    push @lines, sprintf('  %-9s %-28s %s', 'Term::ReadLine', 'line editing in the REPL',
-        eval { require Term::ReadLine; 1 } ? 'core' : 'no');
-    push @lines, sprintf('  %-9s %-28s %s', 'Tk', 'oa desktop',
-        eval { require Tk; 1 } ? 'present (frontend not written yet)' : 'not installed');
+    push @lines, sprintf('  %-9s %-28s %s', 'Term::ReadLine', 'REPL line editing (built-in if absent)',
+        (eval { require Term::ReadLine; 1 } ? 'core' : 'no')
+        . ((defined $Term::ReadLine::IMPLEMENTATION && $Term::ReadLine::IMPLEMENTATION =~ /^(Gnu|EditLine)$/)
+          ? " ($Term::ReadLine::IMPLEMENTATION)" : ', own editor will be used'));
+    push @lines, sprintf('  %-9s %-28s %s', 'Tk', 'oa desktop frontend',
+        (eval { require Tk; 1 } ? 'present' : 'not installed')
+        . (eval { require OldAgent::Desktop; 1 } ? '' : ' (module missing)'));
 
     push @lines, '';
     push @lines, '== config ==';
