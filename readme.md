@@ -111,12 +111,21 @@ oa config          settings
 
 In the REPL: `/help`, `/model`, `/provider <name|url>`, `/base-url`, `/tools`,
 `/yes`, `/undo`, `/history`, `/save`, `/load`, `/cd`, `/sh cmd`, `/paste`,
-`/fmt on|off`, `/editor`, `/doctor`.
+`/fmt on|off`, `/editor`, `/version`, `/doctor`.
 
 `/provider` takes either a provider name (`openai`, `ollama`, `anthropic`,
 `exec`, `echo`) or a base URL — `https://9ol.es/11434` — in which case the
 provider is inferred (a `/v1` suffix means OpenAI-compatible, an `ollama`
-host means Ollama).
+host means Ollama). With no argument it becomes a small wizard: choose the
+protocol from a numbered list, type the base URL (Enter keeps the
+sensible default), and enter an API key (blank keeps the current one,
+`none` clears it).
+
+Settings you change in the session are remembered: `/model`, `/provider`,
+`/base-url`, `/turns`, `/system`, `/tools`, `/yes`/`/no` write the new
+values into your config file (`~/.oldagentrc`, or `$OLDAGENT_CONFIG` if
+you set one; `/version` tells you which file is in play), so the next
+session starts where this one ended. You should have to tell it once.
 
 `oa desktop` is a Tk front end on the same loop, rendered with the same
 markdown-lite formatter. Tk is not core perl, so it stays off the critical

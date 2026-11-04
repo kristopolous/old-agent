@@ -5,7 +5,7 @@ use Test::More;
 use File::Spec ();
 use OldAgent::Util;
 
-plan tests => 25;
+plan tests => 30;
 
 my $perl = $^X;
 my $oa   = File::Spec->catfile('oa');
@@ -71,7 +71,8 @@ like($out, qr/\(echo\) you said: hello there/, 'echo model answered');
 # --- the interactive session, piped (scripts, tmux, tests) -------------
 my $repl_in = File::Spec->catfile($dir, 'repl.txt');
 
-OldAgent::Util::spew($repl_in, "/provider https://9ol.es/11434\n/provider\n/quit\n");
+# /provider <url>: one line sets both, and it is remembered
+OldAgent::Util::spew($repl_in, "/provider https://9ol.es/11434\n/quit\n");
 ($rc, $out) = run(
     argv => ['--no-config', '--provider', 'echo', 'repl'],
     stdin_file => $repl_in,
@@ -79,8 +80,25 @@ OldAgent::Util::spew($repl_in, "/provider https://9ol.es/11434\n/provider\n/quit
 is($rc, 0, 'piped repl exits 0');
 like($out, qr/provider = ollama, base_url = https:\/\/9ol\.es\/11434/,
      '/provider <url> infers the provider from the url');
-like($out, qr/provider = ollama \(https:\/\/9ol\.es\/11434\)/,
-     'and /provider shows the new state');
+like($out, qr/\(remembered in \S+\)/, '/provider <url> is remembered');
+
+# /provider (no argument): the three-step wizard, driven through a pipe
+OldAgent::Util::spew($repl_in, join("",
+    "/provider\n",             # start the wizard
+    "3\n",                     # protocol: 3 = ollama
+    "https://9ol.es/11434\n",  # base url
+    "none\n",                  # api key: none
+    "/quit\n"));
+($rc, $out) = run(
+    argv => ['--no-config', 'repl'],
+    stdin_file => $repl_in,
+);
+is($rc, 0, 'wizard repl exits 0');
+like($out, qr/\(1\) protocol/, 'wizard asks for the protocol');
+like($out, qr/\(2\) base url/, 'wizard asks for the base url');
+like($out, qr/\(3\) api key/, 'wizard asks for the key');
+like($out, qr/provider = ollama, base_url = https:\/\/9ol\.es\/11434, key = \(none\)/,
+     'wizard summary');
 
 OldAgent::Util::spew($repl_in, "hello from a pipe\n/quit\n");
 ($rc, $out) = run(

@@ -29,6 +29,9 @@ sub new {
     my ($class) = @_;
     my $tty;
     return undef unless open($tty, '+<', '/dev/tty');
+    # the tty handle is block-buffered by default; without this, every
+    # keystroke render sits in the stdio buffer and the prompt looks dead
+    { my $ofh = select($tty); $| = 1; select($ofh); }
 
     my $self = {
         tty     => $tty,

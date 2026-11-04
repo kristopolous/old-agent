@@ -345,13 +345,21 @@ sub repl_command {
         return;
     }
     if ($c eq 'model') {
-        if (@r) { $cfg->set(model => $rest); print "model = $rest\n" }
+        if (@r) {
+            $cfg->set(model => $rest);
+            print "model = $rest\n";
+            _remember($cfg, 'model');
+        }
         else    { print "model = " . $cfg->get('model') . "\n" }
         return;
     }
     if ($c eq 'provider' || $c eq 'base-url' || $c eq 'url') {
         if ($c ne 'provider') {
-            if (@r) { $cfg->set(base_url => $r[0]); print "base_url = $r[0]\n" }
+            if (@r) {
+                $cfg->set(base_url => $r[0]);
+                print "base_url = $r[0]\n";
+                _remember($cfg, 'base_url');
+            }
             else   { print "base_url = " . $cfg->get('base_url') . "\n" }
             return;
         }
@@ -360,6 +368,7 @@ sub repl_command {
             if ($arg =~ /^(openai(-compat)?|ollama|anthropic|exec|echo)$/) {
                 $cfg->set(provider => $arg);
                 print "provider = $arg (base_url = " . $cfg->get('base_url') . ")\n";
+                _remember($cfg, 'provider', 'base_url');
             } elsif (_looks_like_url($arg)) {
                 my $u = $arg;
                 $u = "http://$u" unless $u =~ m{^https?://};
@@ -368,33 +377,39 @@ sub repl_command {
                 $cfg->set(provider => $p) if $p ne $cfg->get('provider');
                 print "provider = " . $cfg->get('provider')
                     . ", base_url = $u\n";
+                _remember($cfg, 'provider', 'base_url', 'api_key', 'key_env');
             } else {
                 print "not a known provider (openai, openai-compat, ollama, anthropic, exec, echo)\n";
                 print "  and not a url. try:  /provider http://host:port/v1\n";
             }
         } else {
-            print "provider = " . $cfg->get('provider') . " (" . $cfg->get('base_url') . ")\n";
+            _provider_wizard($a{term}, $cfg);
         }
         return;
     }
     if ($c eq 'turns') {
-        if (@r && $r[0] =~ /^\d+$/) { $cfg->set(max_turns => $r[0]); print "max_turns = $r[0]\n" }
+        if (@r && $r[0] =~ /^\d+$/) {
+            $cfg->set(max_turns => $r[0]);
+            print "max_turns = $r[0]\n";
+            _remember($cfg, 'max_turns');
+        }
         else { print "max_turns = " . $cfg->get('max_turns') . "\n" }
         return;
     }
-    if ($c eq 'yes') { $cfg->set(approve => 'auto'); print "bash commands will run without asking\n"; return }
-    if ($c eq 'no')  { $cfg->set(approve => 'ask');  print "bash commands will ask first\n"; return }
+    if ($c eq 'yes') { $cfg->set(approve => 'auto'); print "bash commands will run without asking\n"; _remember($cfg, 'approve'); return }
+    if ($c eq 'no')  { $cfg->set(approve => 'ask');  print "bash commands will ask first\n"; _remember($cfg, 'approve'); return }
     if ($c eq 'tools') {
         if (@r && ($r[0] eq 'on' || $r[0] eq 'off')) {
             $cfg->set(tools => $r[0] eq 'on' ? 1 : 0);
             $agent->{tools_on} = $r[0] eq 'on' ? 1 : 0;
             print "tools " . $r[0] . "\n";
+            _remember($cfg, 'tools');
         } else {
             print $agent->tools->spec();
         }
         return;
     }
-    if ($c eq 'system') { $cfg->set(system_extra => $rest); print "(extra instructions set)\n"; return }
+    if ($c eq 'system') { $cfg->set(system_extra => $rest); print "(extra instructions set)\n"; _remember($cfg, 'system_extra'); return }
     if ($c eq 'cd') {
         my $d = @r ? $r[0] : OldAgent::Util::home_dir_guess();
         if (chdir($d)) { print "cwd = " . OldAgent::Util::cwd() . "\n" }
@@ -424,6 +439,14 @@ sub repl_command {
         print "loaded " . scalar(@$h) . " messages\n";
         return;
     }
+    if ($c eq 'version' || $c eq 'v') {
+        my @files = $cfg->files;
+        print "oldagent " . OldAgent::version() . "\n";
+        print "config: " . (@files ? join(", ", @files) : "(defaults + environment)") . "\n";
+        print "config file (for /model, /provider, ...): "
+            . (OldAgent::Config::user_config_path() || '(none)') . "\n";
+        return;
+    }
     if ($c eq 'doctor') {
         my ($lines, $ok) = OldAgent::Doctor::report(config => $cfg, ping => 1);
         print(join("\n", @$lines) . "\n");
@@ -447,6 +470,124 @@ sub repl_command {
 }
 
 # --------------------------------------------------------------- helpers --
+
+# /provider wizard: protocol -> base url -> key
+my @PROTOCOLS = (
+    # key,             blurb,                                          default url
+    ['openai',        'OpenAI, /v1/chat/completions (key)',            'https://api.openai.com/v1'],
+    ['openai-compat', 'any OpenAI-compatible server, /v1',             ''],
+    ['ollama',        'local Ollama, OpenAI dialect on /v1',           'http://127.0.0.1:11434/v1'],
+    ['anthropic',     'Anthropic, /v1/messages (key)',                 'https://api.anthropic.com'],
+    ['exec',          'pipe the conversation to a local command',      ''],
+    ['echo',          'echo the prompt back; no network needed',       ''],
+);
+
+sub _key_state {
+    my ($cfg) = @_;
+    if (length $cfg->get('api_key')) {
+        return $cfg->get('key_env')
+            ? "env " . $cfg->get('key_env')
+            : '(set)';
+    }
+    return '(none)';
+}
+
+sub _provider_summary {
+    my ($cfg, $extra) = @_;
+    my $s = "provider = " . $cfg->get('provider')
+          . ", base_url = " . ($cfg->get('base_url') || '(none)')
+          . ", key = " . _key_state($cfg);
+    $s .= " $extra" if $extra;
+    $s .= "\n  (no key yet: type it at the api key step, or export OPENAI_API_KEY)"
+        if $cfg->get('provider') =~ /^openai/ && !length $cfg->get('api_key');
+    return $s . "\n";
+}
+
+sub _remember {
+    my ($cfg, @keys) = @_;
+    my $p = $cfg->remember(@keys);
+    print $p ? "(remembered in $p)\n" : "(could not remember setting)\n";
+}
+
+sub _provider_wizard {
+    my ($term, $cfg) = @_;
+    my $cur = $cfg->get('provider');
+
+    print "\n(1) protocol - number, name, or a base url (current: $cur)\n";
+    my $n = 0;
+    for my $p (@PROTOCOLS) {
+        $n++;
+        printf "  %d  %-14s %s%s\n", $n, $p->[0], $p->[1],
+            ($p->[0] eq $cur ? '  <- current' : '');
+    }
+    my $ans = _read_line($term, 'protocol> ');
+    return unless defined $ans;
+    $ans =~ s/\s+$//;
+
+    my $proto;
+    if ($ans =~ /^\d+$/ && $ans >= 1 && $ans <= @PROTOCOLS) {
+        $proto = $PROTOCOLS[$ans - 1][0];
+    } elsif ($ans =~ /^(openai(-compat)?|ollama|anthropic|exec|echo)$/) {
+        $proto = lc($ans);
+    } elsif (length $ans && _looks_like_url($ans)) {
+        my $u = $ans;
+        $u = "http://$u" unless $u =~ m{^https?://};
+        my $p = _infer_provider($u);
+        $cfg->set(base_url => $u);
+        $cfg->set(provider => $p) if $p ne $cfg->get('provider');
+        print _provider_summary($cfg, '(from url)');
+        _remember($cfg, 'provider', 'base_url');
+        return;
+    } elsif (length $ans) {
+        print "no such protocol: $ans\n";
+        return;
+    } else {
+        $proto = $cur;
+    }
+
+    my ($meta) = grep { $_->[0] eq $proto } @PROTOCOLS;
+    my ($blurb, $durl) = ($meta->[1], $meta->[2]);
+    my $need_url = $proto ne 'exec' && $proto ne 'echo';
+    my $need_key = $proto ne 'exec' && $proto ne 'echo';
+
+    # (2) base url
+    my $url = '';
+    if ($need_url) {
+        my $def = length $durl ? $durl : $cfg->get('base_url');
+        print "(2) base url - $blurb\n    [ $def ]  (enter = use that)\n";
+        my $a2 = _read_line($term, 'base url> ');
+        return unless defined $a2;
+        $a2 =~ s/\s+$//;
+        $url = length $a2 ? $a2 : $def;
+        $url =~ s{/+$}{""};
+    } else {
+        print "(2) base url - not needed for $proto\n";
+    }
+
+    # (3) api key
+    if ($need_key) {
+        print "(3) api key - current: " . _key_state($cfg)
+            . "\n    enter = keep, \"none\" = no key\n";
+        my $a3 = _read_line($term, 'api key> ');
+        return unless defined $a3;
+        $a3 =~ s/\s+$//;
+        if (lc($a3) eq 'none') {
+            $cfg->set(api_key => '');
+            $cfg->set(key_env => '');
+        } elsif (length $a3) {
+            $cfg->set(api_key => $a3);
+            $cfg->set(key_env => '');
+        }
+    } else {
+        print "(3) api key - not needed for $proto\n";
+    }
+
+    $cfg->set(provider => $proto);
+    $cfg->set(base_url => $url) if $need_url;
+    print _provider_summary($cfg);
+    _remember($cfg, 'provider', 'base_url', 'api_key', 'key_env');
+    return;
+}
 
 sub _looks_like_url {
     my ($u) = @_;
@@ -532,7 +673,7 @@ sub _repl_help {
   /undo            drop the last exchange
   /history         what is in context
   /model [NAME]    show or set the model
-  /provider [X]    show, or set the provider (name or url: /provider http://host:11434/v1)
+  /provider        wizard: protocol, base url, key - or /provider <name|url>
   /base-url [URL]  show or set the endpoint url
   /turns [N]       how many tool round trips per message
   /tools [on|off]  show tools, or switch them
@@ -546,6 +687,7 @@ sub _repl_help {
   /save [FILE]     write the transcript to a file
   /load [FILE]     read one back
   /doctor          environment report
+  /version         which oldagent this is, and which config files it read
 EOT
 }
 

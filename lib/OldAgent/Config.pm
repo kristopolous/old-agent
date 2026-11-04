@@ -183,6 +183,57 @@ sub redacted {
     return \%h;
 }
 
+# where persistent settings live: $OLDAGENT_CONFIG, else the first existing
+# user file among the candidates, else ~/.oldagentrc
+sub user_config_path {
+    return $ENV{OLDAGENT_CONFIG}
+        if defined $ENV{OLDAGENT_CONFIG} && length $ENV{OLDAGENT_CONFIG};
+    my $h = OldAgent::home_dir();
+    return undef unless $h;
+    for my $c ("$h/.oldagentrc", "$h/.config/oldagent/rc") {
+        return $c if -f $c;
+    }
+    return "$h/.oldagentrc";
+}
+
+# persist the current values of @keys into the user config file, keeping the
+# other lines of that file (including comments). returns the path, or
+# undef on failure.
+sub remember {
+    my ($self, @keys) = @_;
+    my $path = user_config_path();
+    return undef unless defined $path;
+    my @raw;
+    if (-f $path && open my $in, '<', $path) {
+        while (my $l = <$in>) { chomp $l; push @raw, $l }
+        close $in;
+    }
+    my %target = map { $_ => 1 } @keys;
+    my $val = sub {
+        my $v = $self->{v}{ $_[0] };
+        return (defined $v && length $v) ? $v : undef;
+    };
+    my (@out, %seen);
+    for my $l (@raw) {
+        my ($k, $v) = parse_line($l);
+        if (defined $k && $target{$k}) {
+            if (my $nv = $val->($k)) { push @out, "$k = $nv"; $seen{$k} = 1 }
+            # empty now: drop the line
+        } else {
+            next if $l =~ m{^# oldagent config};
+            push @out, $l;
+        }
+    }
+    for my $k (@keys) {
+        next if $seen{$k};
+        if (my $nv = $val->($k)) { push @out, "$k = $nv" }
+    }
+    my $text = "# oldagent config - things set via /model, /provider, ...\n";
+    $text .= "$_\n" for @out;
+    my $err = OldAgent::Util::spew($path, $text);
+    return $err ? undef : $path;
+}
+
 sub write_file {
     my ($self, $path) = @_;
     my @order = sort keys %{ $self->{v} };
