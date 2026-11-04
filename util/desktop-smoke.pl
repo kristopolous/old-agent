@@ -139,6 +139,17 @@ unlink $path;
   OldAgent::Desktop::_write_json(OldAgent::Desktop::_registry_path(),
       [ grep { defined $_ && ref($_) eq 'HASH' ? ($_->{path} ne $path) : 1 } @r ]); }
 
+# ---- 9b) geometry: entry spans its row, status has its own row below --
+my $ge = $app->{entry};
+my $gs = $app->{stat};
+my $g_ww = $root->winfo('width');
+my $g_ew = $ge->winfo('width');
+my $g_gy = $gs->winfo('y');
+my $g_ey = $ge->winfo('y');
+print "GEO: root=$g_ww entry w=$g_ew (y=$g_ey) status y=$g_gy\n";
+push @fail, 'entry-width' if $g_ew < int($g_ww * 0.5);
+push @fail, 'status-row'  if $g_gy <= $g_ey;
+
 # ---- 10) transcript + tags + status -----------------------------------
 my $txt = $app->{txt};
 print "CONTENT:\n", $txt->get('1.0', 'end'), "\n";

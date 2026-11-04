@@ -231,24 +231,30 @@ sub _build {
     $txt->tag('configure', 'err',      -foreground => '#b00020');
     $self->{txt} = $txt;
 
-    # ---- input row --------------------------------------------------------
-    my $bar = $rw->Frame()->pack(-side => 'bottom', -fill => 'x');
-    my $entry = $rw->Entry(-font => 'Helvetica 11', -relief => 'sunken', -bg => '#fffef5')
-        ->pack(-side => 'left', -fill => 'x', -expand => 1, -padx => [8, 4], -pady => 6);
+    # ---- input row + status line --------------------------------------
+    # this Tk build's pack is broken for widgets inside an intermediate
+    # frame (the frame collapses to 1px and its children stop stretching),
+    # so everything here is a direct child of the root window, packed in
+    # this order: status takes the bottom row, the buttons claim the right
+    # of the row above it, and the entry fills the rest of that row.
+    my $stat = $rw->Label(-anchor => 'w', -relief => 'sunken',
+        -bg => '#eeeeee', -font => 'Helvetica 10', -padx => 8)
+        ->pack(-side => 'bottom', -fill => 'x');
     $self->{btn_send} = $rw->Button(-text => 'Send', -default => 'active',
-        -command => sub { $self->_send })->pack(-side => 'right', -padx => 2, -pady => 6);
+        -command => sub { $self->_send })
+        ->pack(-side => 'right', -padx => 2, -pady => 6);
     $rw->Button(-text => 'Clear',
-        -command => sub { $self->_run_cmd('clear'); $self->_redraw() })->pack(-side => 'right', -padx => 2, -pady => 6);
+        -command => sub { $self->_run_cmd('clear'); $self->_redraw() })
+        ->pack(-side => 'right', -padx => 2, -pady => 6);
     $rw->Button(-text => 'Undo',
-        -command => sub { $self->_run_cmd('undo'); $self->_redraw() })->pack(-side => 'right', -padx => [2, 8], -pady => 6);
+        -command => sub { $self->_run_cmd('undo'); $self->_redraw() })
+        ->pack(-side => 'right', -padx => [2, 8], -pady => 6);
+    my $entry = $rw->Entry(-font => 'Helvetica 11', -relief => 'sunken', -bg => '#fffef5')
+        ->pack(-side => 'bottom', -fill => 'x', -padx => [8, 4], -pady => 6);
     $entry->bind('<Return>', sub { $self->_send });
     $entry->focus;
     $self->{entry} = $entry;
 
-    # ---- status line ------------------------------------------------------
-    my $stat = $rw->Label(-anchor => 'w', -relief => 'sunken',
-        -bg => '#eeeeee', -font => 'Helvetica 10', -padx => 8)
-        ->pack(-side => 'bottom', -fill => 'x');
     $self->{stat} = $stat;
     $self->_status();
 }
