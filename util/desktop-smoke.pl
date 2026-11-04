@@ -115,6 +115,13 @@ my $entry = $app->{entry};
 $entry->insert(0, '**hello world** and `some code` and *italic*');
 $app->_send;
 
+# the reply comes back from a child process: pump events until it lands
+my $deadline = time + 10;
+while ($app->{busy} && time < $deadline) {
+    $root->update;
+    sleep 0.05;
+}
+
 # ---- 8) save + reopen a session ---------------------------------------
 my $sessdir = OldAgent::Desktop::session_dir();
 my $path = $sessdir . '/smoke-test.json';

@@ -247,7 +247,14 @@ sub ansify {
         for my $t (@$line) {
             my ($tags, $str) = @$t;
             my $open = join('', map { $CODE{$_} ? $CODE{$_}[0] : '' } @$tags);
-            my $close = grep { $CODE{$_} && $CODE{$_}[0] ne '' } @$tags ? "\e[0m" : '';
+            # NB: build the close with a scalar `if`, not `grep {..} ? :` --
+            # the latter is parsed as `grep {..} (@$tags ? "\e[0m" : "")`,
+            # i.e. the ternary becomes grep's statement modifier and grep
+            # returns a *count* (0/1) instead of the escape.  That used to
+            # emit a bare `0` and never close a style, so everything after a
+            # code span ran on in its colour.
+            my $close = '';
+            $close = "\e[0m" if grep { $CODE{$_} && $CODE{$_}[0] ne '' } @$tags;
             $s .= $open . $str . $close;
         }
         push @out, $s;

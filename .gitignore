@@ -2,3 +2,9 @@ typescript
 
 # release tarballs live on the github releases page
 *.tgz
+blib/
+MYMETA.json
+MYMETA.yml
+Makefile
+pm_to_blib
+*.o

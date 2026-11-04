@@ -9,7 +9,7 @@ use 5.006;
 
 use OldAgent::Util ();
 
-$OldAgent::VERSION = '0.1.4';
+$OldAgent::VERSION = '0.1.5';
 
 # The one hard rule of this codebase: everything must parse and run on a
 # perl from around the year 2000.  util/compat-lint.pl enforces it.

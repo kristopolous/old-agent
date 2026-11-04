@@ -110,6 +110,13 @@ sub readline {
     my @h = @{ $self->{history} };
     my $W = $self->{cols};
 
+    # a fresh prompt starts with no remembered lines.  if the previous prompt
+    # was wrapped into N lines we must NOT keep believing the terminal still
+    # shows N lines -- the agent reply (and the CLI's own output) has already
+    # scrolled past them, so re-erasing N-1 lines now emits stray newlines
+    # that push the prompt up a line per keystroke.
+    $self->{_lines} = 0;
+
     _render($self, $prompt, $buf, $pos, $W);
 
     while (1) {

@@ -248,7 +248,21 @@ sub _approved {
     my $fh = $self->{out};
     print($fh "\nabout to run: $cmd\n");
     print($fh 'allow? [y]es / [n]o / [a]lways : ');
+
+    # the REPL's line editor leaves the tty in raw mode with a short read
+    # timeout, so a plain <STDIN> would return immediately (empty) and we
+    # would auto-deny before the human can answer.  restore canonical,
+    # echo-on line mode for the duration of the read so it actually blocks
+    # until the user types a line; the editor re-enters raw mode next round.
+    my $raw = 0;
+    if (open(my $t, '+<', '/dev/tty')) {
+        my $was = `stty -a 2>/dev/null`;
+        $raw = ($was =~ /-icanon/) ? 1 : 0;
+        system('stty', 'icanon', 'echo', 'isig', 'min', '1', 'time', '0');
+    }
     my $ans = <STDIN>;
+    $raw && system('stty', '-icanon', '-echo', 'min', '0', 'time', '1');
+
     $ans = '' unless defined $ans;
     $ans =~ s/\s+$//;
     $ans = lc(substr($ans, 0, 1));
