@@ -1,0 +1,47 @@
+#!/usr/bin/env perl
+# oldagent - a tiny agent for old perl and older machines.
+# Run `oa doctor` first on any box you have never seen.
+
+use strict;
+use warnings;
+
+use 5.006;
+use File::Basename ();
+use File::Spec ();
+use Cwd ();
+
+BEGIN {
+    # find lib/ next to this script, following one level of symlink if needed
+    my @try;
+    my $self = $0;
+    push @try, File::Basename::dirname($self);
+    if (-l $self) {
+        my $t = eval { readlink($self) };
+        if (defined $t) {
+            $t = File::Spec->catfile(File::Basename::dirname($self), $t)
+                unless File::Spec->file_name_is_absolute($t);
+            push @try, File::Basename::dirname($t);
+        }
+    }
+    my $abs = eval { Cwd::abs_path($self) };
+    push @try, File::Basename::dirname($abs) if defined $abs;
+    push @try, split(/:/, ($ENV{OLDAGENT_LIB} || ''));
+    for my $d (@try) {
+        next unless defined $d && length $d;
+        my $lib = File::Spec->catdir($d, 'lib');
+        if (-d $lib && -f File::Spec->catfile($lib, 'OldAgent.pm')) {
+            unshift @INC, $lib;
+            last;
+        }
+    }
+}
+
+use OldAgent::CLI ();
+
+my $rc = eval { OldAgent::CLI::run(argv => [@ARGV]) };
+if ($@) {
+    print STDERR "oldagent: internal error: $@\n";
+    print STDERR "try: oa doctor\n";
+    exit 70;
+}
+exit($rc || 0);
