@@ -4,7 +4,7 @@ use lib 'lib';
 use Test::More;
 use OldAgent::Protocol;
 
-plan tests => 19;
+plan tests => 26;
 
 my $c;
 
@@ -53,3 +53,22 @@ my $block = OldAgent::Protocol::results_block([
 like($block, qr/^```result/, 'results are fenced');
 like($block, qr/"tool":"read"/, 'result names the tool');
 like($block, qr/\\nline2/, 'newlines in results are escaped');
+
+# bare objects: models that ignore the fence instruction (and the
+# occasional extra trailing brace)
+my $bare = "{\n\"tool\":\"bash\",\"args\":{\"cmd\":\"lscpu | head -20\"}}\n}\n";
+my $c2 = OldAgent::Protocol::parse($bare);
+is(scalar(@$c2), 1, 'bare object is a call');
+is($c2->[0]{tool}, 'bash', 'bare object tool');
+is($c2->[0]{args}{cmd}, 'lscpu | head -20', 'bare object args survive');
+
+$c2 = OldAgent::Protocol::parse('running it now {"tool":"read","args":{"path":"a.txt"}} done');
+is(scalar(@$c2), 1, 'object embedded in prose is a call');
+is($c2->[0]{args}{path}, 'a.txt', 'embedded object args');
+
+$c2 = OldAgent::Protocol::parse('the config is {"foo":"x","size":2} which means nothing');
+is(scalar(@$c2), 0, 'object without a tool key is not a call');
+
+# fenced and bare forms of the same call collapse to one
+$c2 = OldAgent::Protocol::parse("```tool\n{\"tool\":\"bash\",\"args\":{\"cmd\":\"ls\"}}\n```\n{\"tool\":\"bash\",\"args\":{\"cmd\":\"ls\"}}");
+is(scalar(@$c2), 1, 'fenced + bare duplicate collapse');

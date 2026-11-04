@@ -29,13 +29,16 @@ sub TIEHANDLE {
     my ($class, $w, $tag) = @_;
     return bless { w => $w, tag => $tag }, $class;
 }
-sub WRITE {
+sub _put {
     my ($s, $str) = @_;
-    return 1 unless length $str;
+    return unless defined $str && length $str;
     $s->{w}->insert('end', $str, $s->{tag});
     $s->{w}->see('end');
-    return 1;
 }
+# print HANDLE 'a', 'b'      -> PRINT, one call per argument (list)
+sub PRINT { my ($s, @rest) = @_; $s->_put($_) for @rest; return 1 }
+# print HANDLE $scalar       -> WRITE, one call with the scalar
+sub WRITE { my ($s, $str) = @_; $s->_put($str); return 1 }
 sub CLOSE { return 1 }
 
 # ---------------------------------------------------------------- sessions
@@ -501,34 +504,130 @@ sub _send {
     return if $self->{busy};
 
     $self->_append_msg('user', $text);
-    $self->{busy} = 1;
-    $self->{btn_send}->configure(-state => 'disabled', -text => 'Thinking');
-    $self->_status('busy');
-    $self->{root}->update;    # paint before the (blocking) model call
 
-    # capture the agent's own prints (tool lines) into the transcript
-    my ($reply, $err);
-    if (tie(*OA_CAP_2, 'OldAgent::Desktop::_Out', $self->{txt}, 'sys')) {
-        my $prev = select(OA_CAP_2);
-        ($reply, $err) = $self->{agent}->ask($text);
-        select($prev);
-    } else {
-        ($reply, $err) = $self->{agent}->ask($text);
+    # The model call runs in a SEPARATE PROCESS. This Tk build's main loop
+    # is the only thing that can process events; a blocking ask() in it is
+    # a frozen window (dead buttons, no repaint). So we fork+exec a fresh
+    # perl that rebuilds the agent from the same settings and transcript,
+    # answers, and pipes one JSON line back. The parent keeps pumping
+    # events the whole time. The message travels by argv, the answer by a
+    # single pipe on the child's stdout.
+    my ($rd, $wr);
+    pipe($rd, $wr) or do {
+        my $e = $!;
+        $self->{txt}->insert('end', "\nagent> ", 'sys');
+        $self->{txt}->insert('end', "error: cannot spawn agent: $e\n", 'err');
+        return;
+    };
+
+    my $selfpath = __FILE__;
+    if ($selfpath !~ m{^/}) {
+        my $cwd = (eval { require POSIX; POSIX::getcwd() }) || '';
+        $selfpath = $cwd . '/' . $selfpath if $cwd;
     }
+    my ($libdir) = $selfpath =~ m{^(.*)[/\\]OldAgent[/\\]Desktop\.pm$}s or do {
+        close $rd; close $wr;
+        $self->{txt}->insert('end', "error: cannot locate lib dir\n", 'err');
+        return;
+    };
+    my $child = $libdir . '/OldAgent/desktop-child.pl';
 
+    my $msg = OldAgent::JSON::encode({
+        text       => $text,
+        cfg        => { map { $_ => $self->{agent}{cfg}->get($_) }
+                        qw(provider model base_url key api openai_base
+                           ollama_base ollama_model anthropic_base
+                           anthropic_key exec_cmd) },
+        max_output => $self->{agent}{cfg}->get('max_output') || 3000,
+        history    => [ map { { role => $_->{role}, content => $_->{content} } }
+                        @{ $self->{agent}{history} } ],
+    });
+
+    my $kid = fork();
+    if (!defined $kid) {
+        my $e = $!;
+        close $rd; close $wr;
+        $self->{txt}->insert('end', "\nagent> ", 'sys');
+        $self->{txt}->insert('end', "error: cannot fork: $e\n", 'err');
+        return;
+    }
+    if ($kid == 0) {
+        # child: its stdout becomes the answer pipe; drop the read end and
+        # the parent's write-end copy; exec a clean perl (no Tk, no X).
+        open(STDOUT, '>&=', $wr) or exit 9;
+        close $rd;
+        close $wr;
+        exec('perl', $child, $libdir, $msg) or exit 9;
+        exit 9;
+    }
+    close $wr;
+    $self->{busy}    = 1;
+    $self->{btn_send}->configure(-state => 'disabled', -text => 'Thinking');
+    $self->{acc}     = '';
+    $self->{ask_rd}  = $rd;
+    $self->{ask_kid} = $kid;
+    $self->_status('busy');
+    $self->{root}->after(50, sub { $self->_ask_poll() });
+}
+
+sub _ask_poll {
+    my ($self) = @_;
+    my $rd = $self->{ask_rd};
+    return unless defined $rd;
+    my $n = sysread($rd, my $chunk, 4096);
+    if (!defined $n) {                        # no data yet: keep polling
+        $self->{root}->after(50, sub { $self->_ask_poll() });
+        return;
+    }
+    if ($n == 0) {                            # pipe closed
+        close $rd;
+        if (defined $self->{acc} && length $self->{acc}) {
+            my ($msg, $perr) = eval { OldAgent::JSON::decode($self->{acc}) };
+            if ($msg && ref($msg) eq 'HASH') { $self->_ask_done($msg); return }
+        }
+        $self->_ask_done({ ok => 0, err => 'agent died before answering',
+            lines => '', reply => '', history => [ map { { role => $_->{role}, content => $_->{content} } } @{ $self->{agent}{history} } ] });
+        return;
+    }
+    $self->{acc} .= $chunk;
+    return unless $self->{acc} =~ /\n/;
+    my $line = (split(/\n/, $self->{acc}, 2))[0];
+    close $rd;
+    my ($msg, $perr) = eval { OldAgent::JSON::decode($line) };
+    if (!$msg || ref($msg) ne 'HASH') {
+        $self->_ask_done({ ok => 0, err => "bad reply from agent child" . (defined $perr ? ": $perr" : ""), lines => $line, reply => '', history => [] });
+        return;
+    }
+    $self->_ask_done($msg);
+}
+
+sub _ask_done {
+    my ($self, $msg) = @_;
     $self->{busy} = 0;
     $self->{btn_send}->configure(-state => 'normal', -text => 'Send');
 
-    if ($err) {
-        my $txt = $self->{txt};
-        $txt->insert('end', "\nagent> ", 'sys');
-        $txt->insert('end', "error: $err\n", 'err');
-        $txt->see('end');
-        $self->{agent}->undo;
+    # fold the child's conversation back in (it ran with our history)
+    if (ref($msg->{history}) && @{$msg->{history}}) {
+        $self->{agent}{history} = [ map { { role => $_->{role}, content => $_->{content} } } @{ $msg->{history} } ];
+    }
+
+    if (defined $msg->{lines} && length $msg->{lines}) {
+        for my $ln (split(/\n/, $msg->{lines})) {
+            next unless length $ln;
+            $self->{txt}->insert('end', $ln, "\n", 'sys');
+        }
+        $self->{txt}->see('end');
+    }
+
+    if ($msg->{ok}) {
+        $self->_append_msg('assistant', $msg->{reply});
     } else {
-        $self->_append_msg('assistant', $reply);
+        $self->{txt}->insert('end', "\nagent> ", 'sys');
+        $self->{txt}->insert('end', "error: " . ($msg->{err} || 'unknown'), "\n", 'err');
+        $self->{txt}->see('end');
     }
     $self->_status();
+    $self->_redraw();
 }
 
 # ---------------------------------------------------------------- render --

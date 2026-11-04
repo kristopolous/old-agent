@@ -26,24 +26,48 @@ END {
 my @TIOC = (0x5413, 0x40087468, 0x20087468);   # TIOCGWINSZ: linux, bsd, darwin
 
 sub new {
-    my ($class) = @_;
+    my ($class, %o) = @_;
     my $tty;
-    return undef unless open($tty, '+<', '/dev/tty');
+    # no_tty: build the object without a real terminal (tests);
+    # readline() degrades to undef just like it does when no tty exists.
+    unless ($o{no_tty}) {
+        return undef unless open($tty, '+<', '/dev/tty');
+    }
     # the tty handle is block-buffered by default; without this, every
     # keystroke render sits in the stdio buffer and the prompt looks dead
-    { my $ofh = select($tty); $| = 1; select($ofh); }
+    if (defined $tty) { my $ofh = select($tty); $| = 1; select($ofh); }
 
     my $self = {
-        tty     => $tty,
-        cols    => _winsize($tty) || ($ENV{COLUMNS} && $ENV{COLUMNS} > 2 ? $ENV{COLUMNS} : 80),
-        history => [],
-        _lines  => 0,
+        tty          => $tty,
+        cols         => (defined $tty ? _winsize($tty) : undef)
+                       || ($ENV{COLUMNS} && $ENV{COLUMNS} > 2 ? $ENV{COLUMNS} : 80),
+        history      => [],
+        history_file => $o{history_file},
+        _lines       => 0,
     };
     $self->{cols} = 4 if $self->{cols} < 4;
     bless $self, $class;
 
-    push @RAW, $tty;   # the END block above restores the terminal
+    $self->_load_hist if defined $self->{history_file};
+    $self->_install_int if defined $tty;
+    push @RAW, $tty if defined $tty;   # END block restores the terminal
     return $self;
+}
+
+# ctrl-c must work at any moment - mid-line and, above all, while a
+# model call blocks the process. the editor therefore LEAVES isig on
+# (see the stty line in readline) and handles SIGINT itself: restore the
+# terminal, print ^C, leave with the conventional 130.
+sub _install_int {
+    my ($self) = @_;
+    $SIG{INT} = sub {
+        my $t = $self->{tty};
+        if ($t && fileno($t)) {
+            system('stty', 'icanon', 'isig', 'echo', 'min', '1', 'time', '0');
+        }
+        print "\r\n^C\n";
+        exit 130;
+    };
 }
 
 sub _winsize {
@@ -71,7 +95,7 @@ sub readline {
     return undef unless fileno($tty);
 
     # raw, no echo, 100ms read timeout (timeout lets us tell Esc from arrows)
-    if (system('stty', '-icanon', '-isig', '-echo', 'min', '0', 'time', '1')) {
+    if (system('stty', '-icanon', '-echo', 'min', '0', 'time', '1')) {
         # cannot control the terminal; degrade to a plain read
         print $tty $prompt;
         my $l = <$tty>;
@@ -128,6 +152,7 @@ sub readline {
             push @h, $buf if length $buf && (!@h || $h[-1] ne $buf);
             splice @h, 0, @h > 200 ? @h - 200 : 0;
             $self->{history} = \@h;
+            $self->_save_hist;
             return $buf;
         }
         if ($ord == 4) {                           # ctrl-d
@@ -167,6 +192,7 @@ sub readline {
 
     print $tty "\r\n";
     $self->{history} = \@h;
+    $self->_save_hist;
     return undef;
 }
 
@@ -250,11 +276,53 @@ sub addhistory {
     push @h, $line if !@h || $h[-1] ne $line;
     splice @h, 0, @h > 200 ? @h - 200 : 0;
     $self->{history} = \@h;
+    $self->_save_hist;
     return $self;
+}
+
+# --------------------------------------------------------------- history --
+
+# the line history is a plain text file, one previous `oa> ` line per
+# line, so a fresh session still recalls them with the up arrow.
+sub _load_hist {
+    my ($self) = @_;
+    my $hf = $self->{history_file};
+    my @mem = @{ $self->{history} };
+    my @file;
+    if (defined $hf && -r $hf) {
+        if (open my $fh, '<', $hf) {
+            while (my $l = <$fh>) {
+                chomp $l;
+                push @file, $l if length $l;
+            }
+            close $fh;
+        }
+    }
+    # file lines are the older ones, memory the newer ones; dedupe
+    # keeping the most recent occurrence of each line
+    my (@combined, %seen, @out);
+    @combined = (@file, @mem);
+    for my $l (reverse @combined) {
+        next if $seen{$l}++;
+        push @out, $l;
+    }
+    @out = reverse @out;
+    splice @out, 0, @out > 200 ? @out - 200 : 0;
+    $self->{history} = \@out;
+}
+
+sub _save_hist {
+    my ($self) = @_;
+    my $hf = $self->{history_file};
+    return unless defined $hf;
+    return unless open my $fh, '>', $hf;
+    print $fh "$_\n" for @{ $self->{history} };
+    close $fh;
 }
 
 sub DESTROY {
     my ($self) = @_;
+    $SIG{INT} = 'DEFAULT';
     my $t = $self->{tty};
     if ($t && fileno($t)) {
         system('stty', 'icanon', 'isig', 'echo', 'min', '1', 'time', '0');

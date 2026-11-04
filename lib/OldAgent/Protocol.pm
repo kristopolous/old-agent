@@ -36,6 +36,18 @@ sub parse {
         next if $err || ref($val) ne 'HASH';
         push @calls, _normalize($val);
     }
+    # bare objects, no fence and no TOOL: prefix: some models ignore the
+    # fence instruction and emit the JSON on its own (sometimes with an
+    # extra trailing brace). any object that decodes to a {tool, ...}
+    # shape is a call. extract_objects brace-matches, so stray braces
+    # after the object close do not break it.
+    for my $obj (OldAgent::JSON::extract_objects($text)) {
+        my ($val, $err) = OldAgent::JSON::decode_lenient($obj);
+        next if $err || ref($val) ne 'HASH';
+        my $c = _normalize($val);
+        next unless length $c->{tool};
+        push @calls, $c;
+    }
 
     my %seen;
     my @uniq;

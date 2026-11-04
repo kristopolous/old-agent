@@ -56,6 +56,7 @@ sub emit {
     my ($self, @bits) = @_;
     return if $self->{quiet};
     my $fh = $self->{out};
+    if (ref($fh) eq 'CODE') { $fh->(@bits, "\n"); return }
     print($fh join('', @bits), "\n");
 }
 

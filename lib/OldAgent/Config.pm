@@ -196,6 +196,21 @@ sub user_config_path {
     return "$h/.oldagentrc";
 }
 
+# where the line history lives: one previous `oa> ` line per line, so a
+# fresh session still recalls the last ones with the up arrow.
+# $OLDAGENT_HISTORY overrides (mainly for tests).
+sub history_path {
+    my ($class) = @_;
+    return $ENV{OLDAGENT_HISTORY}
+        if defined $ENV{OLDAGENT_HISTORY} && length $ENV{OLDAGENT_HISTORY};
+    my $p = user_config_path();
+    return undef unless defined $p && length $p;
+    my ($dir) = $p =~ m{^(.*)[/\\]}s;
+    $dir .= '/' if defined $dir && $dir !~ m{[/\\]$}s;
+    $dir = './' unless defined $dir && length $dir;
+    return $dir . 'history';
+}
+
 # persist the current values of @keys into the user config file, keeping the
 # other lines of that file (including comments). returns the path, or
 # undef on failure.

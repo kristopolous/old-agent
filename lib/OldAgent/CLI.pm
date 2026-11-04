@@ -267,7 +267,7 @@ sub repl {
     } elsif (-t STDIN && open(my $probe, '<', '/dev/tty')) {
         close $probe;
         require OldAgent::Term;
-        my $own = OldAgent::Term->new();
+        my $own = OldAgent::Term->new(history_file => OldAgent::Config::history_path());
         if ($own) {
             $term = $own;
             $edit = 'built-in editor: up/down = history, arrows/edit keys, wrap';
@@ -278,7 +278,7 @@ sub repl {
         print "oldagent " . OldAgent::version() . " - perl $], " . OldAgent::Util::uname() . "\n";
         printf "%s / %s / %s\n",
             $cfg->get('provider'), $cfg->get('base_url'), $cfg->get('model');
-        printf "tools %s, bash approval %s. %s. type /help for commands, /quit to leave.\n",
+        printf "tools %s, bash approval %s. %s. type /help for commands, /quit (or ctrl-c) to leave.\n",
             $cfg->get('tools') ? 'on' : 'off', $cfg->get('approve'), $edit;
     }
 
