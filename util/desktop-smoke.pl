@@ -94,9 +94,10 @@ push @fail, 'dialog-mechanics' unless $dlg_ok eq 'typed';
 print "DIALOG: got '$dlg_ok'\n";
 
 # ---- 5b) arg command: what the Commands menu items run ----------------
-# stub _ask (it would block on waitWindow for a real dialog)
+# stub _ask: it no longer waits at all, it answers through a done
+# callback - call it synchronously with the answer.
 no warnings 'redefine';
-*OldAgent::Desktop::_ask = sub { 'new-model' };
+*OldAgent::Desktop::_ask = sub { my ($s, %o) = @_; $o{done}->('new-model') };
 $app->_arg_cmd('model', 'Set model', 'old-model');
 push @fail, 'model-set' unless $cfg->get('model') eq 'new-model';
 my $rc = OldAgent::Config::user_config_path();
@@ -142,13 +143,18 @@ unlink $path;
 # ---- 9b) geometry: entry spans its row, status has its own row below --
 my $ge = $app->{entry};
 my $gs = $app->{stat};
+my $gb = $app->{btn_send};
 my $g_ww = $root->winfo('width');
 my $g_ew = $ge->winfo('width');
+my $g_eh = $ge->winfo('height');
+my $g_bh = $gb->winfo('height');
 my $g_gy = $gs->winfo('y');
 my $g_ey = $ge->winfo('y');
-print "GEO: root=$g_ww entry w=$g_ew (y=$g_ey) status y=$g_gy\n";
-push @fail, 'entry-width' if $g_ew < int($g_ww * 0.5);
-push @fail, 'status-row'  if $g_gy <= $g_ey;
+print "GEO: root=$g_ww entry w=$g_ew h=$g_eh send h=$g_bh (y=$g_ey) status y=$g_gy\n";
+push @fail, 'entry-width'  if $g_ew < int($g_ww * 0.5);
+push @fail, 'status-row'   if $g_gy <= $g_ey;
+push @fail, 'entry-height' if abs($g_eh - $g_bh) > 1;
+push @fail, 'input-small'  if $g_eh < 24;
 
 # ---- 10) transcript + tags + status -----------------------------------
 my $txt = $app->{txt};

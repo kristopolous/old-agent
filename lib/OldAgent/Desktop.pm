@@ -240,17 +240,21 @@ sub _build {
     my $stat = $rw->Label(-anchor => 'w', -relief => 'sunken',
         -bg => '#eeeeee', -font => 'Helvetica 10', -padx => 8)
         ->pack(-side => 'bottom', -fill => 'x');
+    # only Send sits beside the entry: Undo and Clear are conversation
+    # commands, not input actions - they live in the Commands menu, next
+    # to the other /commands.
     $self->{btn_send} = $rw->Button(-text => 'Send', -default => 'active',
         -command => sub { $self->_send })
-        ->pack(-side => 'right', -padx => 2, -pady => 6);
-    $rw->Button(-text => 'Clear',
-        -command => sub { $self->_run_cmd('clear'); $self->_redraw() })
-        ->pack(-side => 'right', -padx => 2, -pady => 6);
-    $rw->Button(-text => 'Undo',
-        -command => sub { $self->_run_cmd('undo'); $self->_redraw() })
-        ->pack(-side => 'right', -padx => [2, 8], -pady => 6);
-    my $entry = $rw->Entry(-font => 'Helvetica 11', -relief => 'sunken', -bg => '#fffef5')
+        ->pack(-side => 'right', -padx => [2, 10], -pady => 6);
+    my $entry = $rw->Entry(-font => 'Helvetica 12', -relief => 'sunken', -bg => '#fffef5')
         ->pack(-side => 'bottom', -fill => 'x', -padx => [8, 4], -pady => 6);
+    # in this Tk build the entry's natural height is a few px shorter than
+    # the button's, and Entry does not accept -height at all - so measure
+    # the gap after the first layout and close it with internal padding,
+    # which does change the widget's real height.
+    $rw->update;
+    my $dh = $self->{btn_send}->winfo('height') - $entry->winfo('height');
+    $entry->packConfigure(-ipady => int($dh / 2)) if $dh > 0;
     $entry->bind('<Return>', sub { $self->_send });
     $entry->focus;
     $self->{entry} = $entry;
@@ -345,17 +349,32 @@ my %PERSIST_KEYS = (
     system     => [qw(system_extra)],
 );
 
+# real prompts for the one-field dialogs; the menu items pass a window
+# title, this is what the label inside the dialog says.
+my %ARG_PROMPT = (
+    model     => 'model name (e.g. gpt-4o-mini)',
+    provider  => 'provider name or endpoint URL (openai, ollama, https://host/v1)',
+    'base-url'=> 'endpoint URL (e.g. http://localhost:11434/v1)',
+    turns     => 'max tool round trips per message (number)',
+    system    => 'standing instructions for the model',
+    cd        => 'new working directory',
+    sh        => 'shell command to run now, outside the conversation',
+);
+
 sub _arg_cmd {
     my ($self, $c, $title, $default) = @_;
-    my $a = $self->_ask(title => $title, prompt => '/$c ...', default => $default);
-    return unless defined $a && length $a;
-    $self->_run_cmd($c, $a);
-    my $keys = $PERSIST_KEYS{$c};
-    if ($keys) {
-        my $p = $self->{cfg}->remember(@$keys);
-        $self->_flash("remembered in $p") if $p;
-    }
-    $self->_status();
+    $self->_ask(title => $title, prompt => $ARG_PROMPT{$c} || $title,
+        default => $default,
+        done => sub {
+            my ($a) = @_;
+            $self->_run_cmd($c, $a);
+            my $keys = $PERSIST_KEYS{$c};
+            if ($keys) {
+                my $p = $self->{cfg}->remember(@$keys);
+                $self->_flash("remembered in $p") if $p;
+            }
+            $self->_status();
+        });
 }
 
 # --------------------------------------------------------------- sessions --
@@ -371,19 +390,22 @@ sub new_session {
 
 sub save_session {
     my ($self) = @_;
-    my $name = $self->_ask(title => 'Save session',
+    $self->_ask(title => 'Save session',
         prompt  => 'session name (stored in ' . OldAgent::Desktop::session_dir() . ')',
-        default => $self->{session} eq 'untitled' ? 'session' : $self->{session});
-    return unless defined $name && length $name;
-    $name =~ s{[^A-Za-z0-9_.-]+}{_}g;
-    my $path = OldAgent::Desktop::session_dir() . '/' . $name . '.json';
-    $self->_run_cmd('save', $path);
-    my $n = scalar(@{ $self->{agent}->history() });
-    OldAgent::Desktop::remember_session($name, $path, scalar(grep { $_->{role} eq 'user' } @{ $self->{agent}->history() }));
-    $self->{session} = $name;
-    $self->_rebuild_recent();
-    $self->_status();
-    $self->_flash('saved ' . $n . ' messages as ' . $path);
+        default => $self->{session} eq 'untitled' ? 'session' : $self->{session},
+        done => sub {
+            my ($name) = @_;
+            return unless length $name;
+            $name =~ s{[^A-Za-z0-9_.-]+}{_}g;
+            my $path = OldAgent::Desktop::session_dir() . '/' . $name . '.json';
+            $self->_run_cmd('save', $path);
+            my $n = scalar(@{ $self->{agent}->history() });
+            OldAgent::Desktop::remember_session($name, $path, scalar(grep { $_->{role} eq 'user' } @{ $self->{agent}->history() }));
+            $self->{session} = $name;
+            $self->_rebuild_recent();
+            $self->_status();
+            $self->_flash('saved ' . $n . ' messages as ' . $path);
+        });
 }
 
 sub open_session {
@@ -408,41 +430,44 @@ sub _load_path {
 
 # ------------------------------------------------------------------ dialog --
 
-# a one-field dialog; returns the text, or undef on cancel
+# a one-field dialog. NON-BLOCKING: returns immediately; when the user
+# clicks OK (or presses Return), $o{done} is called with the text,
+# scheduled one main-loop tick after the window is destroyed. Cancel and
+# the window close never call it.
+#
+# Why no wait: in this Tk build waitWindow and waitVariable never wake up
+# (verified: the main loop stays parked forever), and pumping update()
+# inline from a menu callback re-enters the event loop and crashes
+# ("Modification of a read-only value attempted"). A dialog that parks
+# the main loop is a dialog that locks the app - so the app stays in the
+# main loop, and the answer rides back through it.
 sub _ask {
     my ($self, %o) = @_;
-    my $rw  = $self->{root};
-    my $ans = undef;
+    my $rw   = $self->{root};
+    my $done = $o{done} or return;
     my $t = eval { $rw->Toplevel(-title => $o{title} || 'oldagent') };
-    if (!$t) { $self->_flash("dialog failed: $@"); return undef }
+    if (!$t) { $self->_flash("dialog failed: $@"); return }
 
-    my $frm = $t->Frame()->pack(-fill => 'both', -expand => 1, -padx => 12, -pady => 10);
-    $frm->Label(-text => $o{prompt} || '', -justify => 'left')
-        ->pack(-anchor => 'w', -padx => 4, -pady => [4, 6]);
-    my $e = $frm->Entry(-width => 48, -relief => 'sunken')
-        ->pack(-fill => 'x', -padx => 2, -pady => 6);
+    # direct children of the toplevel - same frame-pack quirk as the
+    # input row: an intermediate frame would collapse to 1px here too.
+    my $lab = $t->Label(-text => $o{prompt} || '', -justify => 'left')
+        ->pack(-anchor => 'w', -padx => [12, 4], -pady => [12, 6]);
+    my $e = $t->Entry(-width => 44, -relief => 'sunken')
+        ->pack(-fill => 'x', -expand => 1, -padx => 12, -pady => 4);
     $e->insert(0, $o{default} || '');
-    my $bar = $frm->Frame()->pack(-fill => 'x');
-    $bar->Button(-text => 'OK', -command => sub {
-        $ans = $e->get(); $t->destroy;
-    })->pack(-side => 'right', -padx => 4, -pady => 8);
-    $bar->Button(-text => 'Cancel', -command => sub { $t->destroy })
-        ->pack(-side => 'right', -pady => 8);
-
-    # every exit path destroys $t. this Tk build's waitWindow never
-    # wakes up when the window goes away (verified), so pump the event
-    # loop ourselves until the dialog is gone - the same loop that makes
-    # after() timers and button invokes work.
-    my $ret = sub { $ans = $e->get(); $t->destroy; };
-    $e->bind('<Return>', $ret);
-    $t->bind('<Return>', $ret);
+    my $finish = sub {
+        my $v = $e->get;
+        $v = '' unless defined $v;
+        $t->destroy;
+        $rw->after(10, sub { $done->($v) });
+    };
+    $t->Button(-text => 'OK', -command => $finish)
+        ->pack(-side => 'right', -padx => [4, 12], -pady => 10);
+    $t->Button(-text => 'Cancel', -command => sub { $t->destroy })
+        ->pack(-side => 'right', -padx => 4, -pady => 10);
+    $e->bind('<Return>', $finish);
+    $t->bind('<Return>', $finish);
     $e->focus;
-    eval { $t->grab_set; 1 };
-    while (eval { $t->winfo('exists') }) {
-        $rw->update if eval { $rw->winfo('exists') };
-        select(0, 0, 0, 0.02);
-    }
-    return $ans;
 }
 
 # a read-only text window
@@ -531,7 +556,7 @@ sub _render_md {
         for my $tok (@$line) {
             my ($tags, $str) = @$tok;
             next unless defined $str && length $str;
-            $txt->insert('end', $str, @$tags);
+            $txt->insert('end', $str, join(',', @$tags));
         }
         $txt->insert('end', "\n", 'plain');
     }
@@ -549,11 +574,14 @@ sub _redraw {
         my $model = $self->{cfg}->get('model');
         my $base  = $self->{cfg}->get('base_url');
         $txt->insert('end', "\n", 'plain');
-        $self->_render_md(
-            "ready: **$prov** / *$model*"
-            . ($base ? " at `$base`" : '')
-            . "\n\n**Commands** in the menu bar are the `/commands` - same code as the terminal.\n"
-            . "Start with a message below, or **File > New session**.\n");
+        $txt->insert('end',
+            "start: type a message below and press Enter\n", 'note');
+        $txt->insert('end',
+            "commands: the menu bar above is the /commands - pick from"
+            . " Commands (Model, Provider, Base URL, Tools, Approve...), "
+            . "or type /help below for the full list.\n", 'note');
+        $txt->insert('end',
+            "ready: $prov / $model" . ($base ? " at $base" : '') . "\n", 'note');
         return;
     }
     for my $m (@h) {
