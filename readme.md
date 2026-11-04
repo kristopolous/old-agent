@@ -109,11 +109,29 @@ oa tools           what the model thinks it can do
 oa config          settings
 ```
 
-In the REPL: `/help`, `/model`, `/tools`, `/yes`, `/undo`, `/history`,
-`/save`, `/load`, `/cd`, `/sh cmd`, `/paste`, `/doctor`.
+In the REPL: `/help`, `/model`, `/provider <name|url>`, `/base-url`, `/tools`,
+`/yes`, `/undo`, `/history`, `/save`, `/load`, `/cd`, `/sh cmd`, `/paste`,
+`/fmt on|off`, `/editor`, `/doctor`.
 
-`oa desktop` (a Tk front end on the same loop) is not built yet; Tk is not
-core perl, so it stays off the critical path.
+`/provider` takes either a provider name (`openai`, `ollama`, `anthropic`,
+`exec`, `echo`) or a base URL — `https://9ol.es/11434` — in which case the
+provider is inferred (a `/v1` suffix means OpenAI-compatible, an `ollama`
+host means Ollama).
+
+`oa desktop` is a Tk front end on the same loop, rendered with the same
+markdown-lite formatter. Tk is not core perl, so it stays off the critical
+path: `oa` works without it, and it only loads if `Tk` is present.
+
+## markdown, in a terminal and a window
+
+Replies are rendered by a small markdown-lite pass (bold, italic,
+underscore emphasis, inline code, strikeout, links, images, block quotes,
+headings, lists, fenced code). In a terminal it becomes ANSI colour and
+weight, off the moment the output is piped. The same token stream drives
+the Tk window, where it becomes font weight and colour instead of escapes.
+The inline parser is a left-to-right state machine modelled on streamdown /
+CommonMark, so `**bold**`, `*slant*`, `_underscore_`, `` `code` ``,
+`***both***` and `~~gone~~` all come out right, and `snake_case` does not.
 
 ## repository
 
@@ -128,9 +146,12 @@ lib/OldAgent/Provider.pm  openai / ollama / anthropic / exec / echo
 lib/OldAgent/HTTP.pm   curl, wget, HTTP::Tiny, LWP, raw socket
 lib/OldAgent/JSON.pm   JSON, because JSON.pm is not in old perl
 lib/OldAgent/Config.pm config layers
+lib/OldAgent/Textfmt.pm  markdown-lite: a token stream for both ANSI and Tk
+lib/OldAgent/Term.pm   a small line editor: history, arrows, wrapping
+lib/OldAgent/Desktop.pm  the optional Tk window
 lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
-t/                     176 tests, no network needed
+t/                     187 tests, no network needed
 ```
 
 ## keeping it old

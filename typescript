@@ -1,0 +1,6 @@
+Script started on 2026-11-03 22:55:30-08:00 [COMMAND="./oa --base-url https://9ol.es/11434/v1 --provider openai --model qwen3.8 --max-tokens 4000 --turns 1 -y ask 'Output exactly 3 short lines: **bold word**, *slanted phrase*, snake_case_name'" <not executed on terminal>]
+[1mbold word0
+[3mslanted phrase0
+snake_case_name0
+
+Script done on 2026-11-03 22:55:35-08:00 [COMMAND_EXIT_CODE="0"]
