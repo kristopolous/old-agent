@@ -110,7 +110,10 @@ sub _post {
     }
     if ($r->{status} < 200 || $r->{status} > 299) {
         my $detail = OldAgent::Util::clip(OldAgent::Util::one_line($r->{body}), 600);
-        return (undef, "http $r->{status} from $url: $detail");
+        $detail = "" if !defined $detail || !length $detail;
+        return (undef, $detail
+                 ? "request to $url failed (http $r->{status}): $detail"
+                 : "request to $url failed (http $r->{status})");
     }
     my ($data, $err) = OldAgent::JSON::parse_ndjson($r->{body});
     if ($err) {

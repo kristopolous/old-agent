@@ -37,11 +37,11 @@ ok(-f $rc, 'file written');
 open my $fh, '<', $rc or fail 'rc not readable';
 my $raw = do { local $/; <$fh> };
 close $fh;
-like($raw, qr{^model = remembered-model$}m, 'model persisted');
-like($raw, qr{^provider = echo$}m, 'provider persisted');
-like($raw, qr{^api_key = sk-test$}m, 'api key persisted');
-like($raw, qr{^# a comment$}m, 'unrelated lines kept');
-like($raw, qr{^history_chars = 1$}m, 'unrelated keys kept');
+like($raw, qr{^model = remembered-model(?:\n|\z)}m, 'model persisted');
+like($raw, qr{^provider = echo(?:\n|\z)}m, 'provider persisted');
+like($raw, qr{^api_key = sk-test(?:\n|\z)}m, 'api key persisted');
+like($raw, qr{^# a comment(?:\n|\z)}m, 'unrelated lines kept');
+like($raw, qr{^history_chars = 1(?:\n|\z)}m, 'unrelated keys kept');
 
 # --- round trip: a fresh load picks it up --------------------------------
 my $fresh = OldAgent::Config->load(overrides => { provider => 'echo' });
@@ -55,7 +55,7 @@ open $fh, '<', $rc or fail 'rc not readable (2)';
 $raw = do { local $/; <$fh> };
 close $fh;
 unlike($raw, qr{^api_key = }m, 'empty api key removed');
-like($raw, qr{^model = remembered-model$}m, 'other keys survive a removal');
+like($raw, qr{^model = remembered-model(?:\n|\z)}m, 'other keys survive a removal');
 
 # --- /version in the REPL ------------------------------------------------
 my $oa = File::Spec->catfile(Cwd::getcwd(), 'oa');
@@ -74,5 +74,5 @@ ok(-f $rc2, 'repl wrote the config file');
 open my $fh2, '<', $rc2 or fail 'rc2 not readable';
 my $raw2 = do { local $/; <$fh2> };
 close $fh2;
-like($raw2, qr{^model = e2e-model$}m, 'repl /model persisted');
-like($raw2, qr{^provider = echo$}m, 'repl /provider persisted');
+like($raw2, qr{^model = e2e-model(?:\n|\z)}m, 'repl /model persisted');
+like($raw2, qr{^provider = echo(?:\n|\z)}m, 'repl /provider persisted');

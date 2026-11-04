@@ -160,8 +160,37 @@ lib/OldAgent/Term.pm   a small line editor: history, arrows, wrapping
 lib/OldAgent/Desktop.pm  the optional Tk window
 lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
-t/                     187 tests, no network needed
+t/                     257 tests, no network needed
 ```
+
+## changelog
+
+0.1.6
+- HP-UX 5.8.8 fixes: a stray `%` before a `%{...}` hash deref is a parse
+  error on old perl (gone); `GetOptionsFromArray` (5.010+) is used only when
+  present; a config-persistence test now uses a `$`-under-`/m`-safe pattern
+  (old perl does not treat `$` as a line boundary under `/m`).
+- error message for a bad HTTP status is now "request to <url> failed
+  (http <n>)" so the reason is clear even when the underlying socket error
+  text differs by platform.
+- Ollama: streamed/NDJSON replies are joined correctly (so a non-empty last
+  chunk is not lost), the `think` option is passed when `thinking` is set,
+  and a `thinking` field is surfaced when `content` is empty.
+- tool-call parsing now also recognises native model tool markup
+  (`<|tool_call>call:tool{...}</tool_call|>`), OpenAI-style
+  `{"function":..., "arguments":...}` and `{"name":..., "arguments":...}`, and
+  a bare `{"command":"..."}` (treated as `bash`). `arguments` may be a JSON
+  string.
+- the system prompt no longer primeds the model to call itself a text-only
+  assistant.
+
+0.1.5
+- the approval prompt no longer auto-denies while the line editor's raw mode
+  is still in force (the terminal is put back to canonical mode before the
+  read).
+- a code span no longer leaves the rest of the reply coloured (a
+  `grep {...} ? a : b` precedence trap).
+- the cursor no longer jumps a line per keystroke when the prompt wraps.
 
 ## keeping it old
 
