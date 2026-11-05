@@ -33,7 +33,8 @@ compiler, a CPAN mirror, or root.
 
 ## requirements
 
-* perl 5.006 (2000) or newer. Nothing from CPAN.
+* perl 5.006 (2000) or newer. Nothing from CPAN. (perl 5.001? see `oa1`
+  below: one file, fewer tools, same protocol.)
 * `sh` for the bash tool, `curl` or `wget` for https (one of them is
   basically always installed).
 * Optional and used only if present: `HTTP::Tiny`, `LWP`, `IO::Socket::SSL`,
@@ -152,6 +153,7 @@ CommonMark, so `**bold**`, `*slant*`, `_underscore_`, `` `code` ``,
 ```
 oa                     entry point
 oa-proxy               the companion bridge (modern perl, no old-Perl rules)
+oa1                    the one-file edition for perl 5.001 (OPENSTEP, SunOS 4)
 lib/OldAgent.pm        version, config discovery
 lib/OldAgent/CLI.pm    flags and the REPL
 lib/OldAgent/Agent.pm  the loop, the system prompt, approvals
@@ -169,8 +171,55 @@ lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
 util/desk-trace.pl     drives the desktop through a conversation under xvfb
                        and reports rebuilds, self-resizing, screen/history drift
-t/                     281 tests, no network needed
+t/                     324 tests, no network needed (t/97 is oa1 against a
+                       fake ollama on a local socket)
 ```
+
+## oa1: one file, for perl 5.001
+
+`oa1` is oldagent for a perl older than the one `oa` is written for: a
+NeXT running OPENSTEP 4.2 ships perl 5.001 (1995), and 5.001 has no `our`,
+no `foreach my`, no `qr//`, no `$f->()`, no three-argument `open`, no
+`POSIX`, no `IO::*`, no `File::Spec`, and `use strict` does not know about
+`$a` and `$b` outside package main. Porting the tree down to that dialect
+would wreck it for everything newer, so `oa1` is a separate single file
+(about 1100 lines) written in perl 5.000: references, `my`, `=>`, closures
+called as `&$f()`, named signal handlers, bareword filehandles.
+
+it speaks the same tool protocol as `oa` (```tool blocks in, ```result
+blocks back, the same system prompt and rules), reads the same
+`~/.oldagentrc`, and talks to ollama's native `/api/chat` (streaming, token
+by token) or an OpenAI-compatible `/v1/chat/completions` over a raw socket.
+http only: a machine this old has no TLS anyway, so point it at a local
+model or at oa-proxy. tools: read, write, edit, list, bash (with the
+same ask / auto / off approval on the terminal), done.
+
+```
+perl oa1 --base-url http://10.0.0.1:11434 --model qwen3.8 models
+perl oa1 ask "hello, in one sentence what are you?"
+perl oa1 do "what kind of computer do I have? one command is enough"
+perl oa1                 # a session: /model, /base, /approve, /help, /quit
+```
+
+you do not have to know which one to run: `oa` checks `$]` before it
+parses anything else and, on a perl older than 5.006, execs `oa1` next to
+it with a one-line note (`OA_MINIMAL=1` forces that on any perl). `oa1
+doctor` shows the settings, the shell, uname or hostinfo, the tty, and
+whether the endpoint answers; `--debug` prints the system prompt, raw
+replies, calls and results on stderr; `--ascii` (the default unless LANG
+says utf-8) folds the model's em dashes and curly quotes to ascii, since
+a 1990s terminal shows an em dash as `b`.
+
+on a 486 with 64 MB under OPENSTEP 4.2 a chat answer streams in about
+five seconds with no measurable CPU. "tell me a bit about this machine"
+made the model run four read-only probes (hostinfo/vm_stat, `ls /`,
+`/NextApps`, the home directory), read the readme, and conclude "a vintage
+NeXTSTEP box on a 486, running a minimal Perl agent" - a couple of
+minutes, almost all of it the model's own time. getting the tree there:
+the box has ftp, so `curl -T oldagent.tar ftp://user:pass@box/` and
+`gnutar xf`. `t/97-oa1.t` runs oa1 against a fake ollama on a local socket,
+lints it for anything newer than 5.001, and checks the handoff. there is
+no desktop for it: no Tk, no X, and no plan for one.
 
 ## oa-proxy: a bridge for machines that stopped in 2000
 
@@ -208,6 +257,28 @@ oa-proxy --port 8470 --mcp ~/.oldagent/mcp.json \
 ```
 
 ## changelog
+
+unreleased
+- ollama native (`/api/chat`): the system prompt was sent as a top-level
+  `system` field, which that endpoint ignores (it belongs to `/api/generate`),
+  so a model behind a `/v1`-less base url never learned it had tools and
+  answered like a chatbot ("I don't have access to external tools"). it
+  goes as the first message with role `system` now, on the one-shot and the
+  streaming path (t/43-ollama-payload.t). the openai-compatible path was
+  always right, which is why the HP-UX box never showed it.
+- the system prompt says that questions about the machine - what it is,
+  what is installed, what is wrong - are answered by running a command,
+  not from memory.
+- `oa` hands over to `oa1` on a perl older than 5.006 (the check runs
+  before anything else in the file is parsed); `OA_MINIMAL=1` forces it.
+- `oa1`: oldagent in one file for perl 5.001 (OPENSTEP 4.2 on a 486 is
+  the test box). same protocol, same rc, raw-socket http to ollama
+  (streaming) or an OpenAI-compatible endpoint; read/write/edit/list/bash
+  /done with terminal approval; `--debug` shows raw replies and calls.
+  a reply that is nothing but one backticked command is taken as a bash
+  proposal (small models do that) - it still goes through approval.
+  `oa1 doctor`; `--ascii` folds utf-8 punctuation for 1990s terminals.
+  t/97-oa1.t: a fake ollama on a local socket plus a dialect lint.
 
 0.1.8
 - a reply with no tool call ends the turn. the loop only nudges the model

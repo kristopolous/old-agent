@@ -3,7 +3,7 @@
 working order: local desktop first, then HP-UX, then release.
 snapshots: use `DISPLAY=:1` (Xnest 1024x768) via xdotool + util/snap.pl + tesseract.
 
-STATUS: 1-12 done. 0.1.8 (this tree) is at /mount/volatile/hpux/oa2 (old tree
+STATUS: 1-13 done. 0.1.8 (this tree) is at /mount/volatile/hpux/oa2 (old tree
 kept as oa2.0.1.5.bak); its suite is green there (279 ok, 3 skipped).
 
 ## 9. desktop chat is a chat (local) - DONE
@@ -93,6 +93,32 @@ on busy/Thinking after the second message. five bugs, all fixed:
       newline, and Tk then deletes the newline before the range instead -
       which ate the line break above every live bubble. `end-1c`.
 - [x] the welcome text clears on the first message.
+## 13. the NeXT: perl 5.001 on a 486 (OPENSTEP 4.2) - DONE, as oa1
+the box: NeXT Mach 4.2 / OPENSTEP 4.2, i386 (486), 64 MB, perl 5.001, csh,
+no cc, no uname, ftp + telnet, ollama reachable at 10.0.0.1:11434.
+- [x] probed 5.001 (util: see t/97 lint list): no our / foreach my / qr /
+      $f->() / 3-arg open / prototypes / UNIVERSAL::can / POSIX / IO /
+      File::Spec / use vars; coderef signal handlers are ignored (named
+      handlers only); Socket.pm has no inet_aton; gethostbyname rejects
+      dotted quads; select($old) does not restore STDOUT.
+- [x] decided: not a port (84 foreach my, 40 ->(), 35 module uses would
+      drag the tree down to 1995) - a separate one-file `oa1` in the
+      5.000 dialect, same protocol, same rc, a fake-ollama test (t/97).
+- [x] live on the box: models / ask (5 s, 0.0u) / do (7 rounds to "a NeXT
+      Computer running NeXTSTEP / OpenStep"). the desktop is out of
+      scope there (no Tk, no X).
+- [x] the REPL session where qwen said "I don't have access to external
+      tools": ollama's /api/chat ignores a top-level `system` field, so the
+      prompt never arrived - in oa1 AND in the main tree's ollama-native
+      path (the HP-UX box uses openai-compat, which was fine). system
+      message now; t/43 pins it. prompt: machine questions are answered
+      with a command. with that, "tell me a bit about this machine" ran
+      four probes + a read and concluded correctly.
+- [x] `oa` decides by itself: `$] < 5.006` (checked before any `use`)
+      execs `oa1` next to it. `oa doctor` on the NeXT: endpoint answers,
+      qwen3.8 is one of 2 models. `--ascii` for the em-dash-as-"b" terminal.
+      the tree lives at ~/oldagent on the box (ftp + gnutar).
+
 ## 12. plain text, for the PA-RISC box - DONE
 the widget bubbles were still janky on HP-UX: a widget per message and a
 font-measurement pass per word is real work on a 1990s CPU. so: no boxes.

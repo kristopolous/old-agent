@@ -2,6 +2,33 @@
 # oldagent - a tiny agent for old perl and older machines.
 # Run `oa doctor` first on any box you have never seen.
 
+# a perl older than 5.006 cannot compile the tree (no warnings.pm, no
+# our, no foreach my ...). before anything below is even parsed, hand
+# over to oa1, the one-file edition next to this script. only perl 5.000
+# syntax in this block. OA_MINIMAL=1 forces the handover on any perl.
+BEGIN {
+    if ($] < 5.006 || $ENV{OA_MINIMAL}) {
+        my $self = $0;
+        my $t = -l $self ? readlink($self) : undef;
+        if (defined $t) {
+            $self =~ s{[^/]*$}{};
+            $self = ($t =~ m{^/}) ? $t : "$self$t";
+        }
+        my $dir = $self;
+        $dir =~ s{[^/]*$}{};
+        $dir = './' unless length $dir;
+        my $oa1 = "${dir}oa1";
+        if (-f $oa1) {
+            print STDERR "oa: this perl is $], older than oa needs (5.006); running oa1, the one-file edition\n"
+                unless $ENV{OA_MINIMAL} || grep { $_ eq '-q' || $_ eq '--quiet' } @ARGV;
+            exec($^X, $oa1, @ARGV);
+            die "oa: could not start $oa1: $!\n";
+        }
+        die "oa: this perl is $] and oa needs 5.006; the one-file edition oa1 is for a perl this old, but it is not next to $0\n"
+            if $] < 5.006;
+    }
+}
+
 use strict;
 use warnings;
 

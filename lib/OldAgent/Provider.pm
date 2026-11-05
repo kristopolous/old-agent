@@ -190,8 +190,11 @@ sub _ollama_stream {
     $options{think} = OldAgent::JSON::num(defined $think && $think eq '1' ? 1 : 0);
     my %payload = (
         model    => $self->{cfg}->get('model'),
-        system   => $a{system},
-        messages => [ map { { role => $_->{role}, content => $_->{content} } }
+        # /api/chat has no top-level system field (that is /api/generate):
+        # the system prompt goes in as the first message, or the model
+        # never learns it has tools
+        messages => [ { role => 'system', content => OldAgent::JSON::str($a{system}) },
+                      map { { role => $_->{role}, content => $_->{content} } }
                       @{ $self->_clean_messages($a{messages}) } ],
         stream   => OldAgent::JSON::num(1),
     );
@@ -371,8 +374,11 @@ sub _ollama {
     $options{think} = OldAgent::JSON::num(defined $think && $think eq '1' ? 1 : 0);
     my %payload = (
         model    => $self->{cfg}->get('model'),
-        system   => $a{system},
-        messages => [ map { { role => $_->{role}, content => $_->{content} } }
+        # /api/chat has no top-level system field (that is /api/generate):
+        # the system prompt goes in as the first message, or the model
+        # never learns it has tools
+        messages => [ { role => 'system', content => OldAgent::JSON::str($a{system}) },
+                      map { { role => $_->{role}, content => $_->{content} } }
                       @{ $self->_clean_messages($a{messages}) } ],
         stream   => OldAgent::JSON::num(0),
     );

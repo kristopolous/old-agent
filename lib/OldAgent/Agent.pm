@@ -93,7 +93,10 @@ sub system_prompt {
         $s .= "How to act\n";
         $s .= "You act by emitting a fenced block tagged tool containing one JSON "
             . "object; the system runs it and returns the result. Never say you "
-            . "cannot run something - emit the tool block instead. Execution stops "
+            . "cannot run something - emit the tool block instead. Questions about "
+            . "this machine - what it is, what is installed, what is wrong - are "
+            . "answered by running a command and reading the result, not from "
+            . "memory. Execution stops "
             . "at the end of your reply; results arrive in the next message inside a "
             . "```result block as one JSON object per line.\n\n";
         $s .= "  ```tool\n";
