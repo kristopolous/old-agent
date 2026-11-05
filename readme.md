@@ -24,6 +24,8 @@ Proof? Here you go, HP-UX on 32-bit PA-RISC
 And here is the gui, `oa desktop`
 <img width="1280" height="1024" alt="desktop" src="https://github.com/user-attachments/assets/18e64aec-9e40-4edd-9324-0e9c9a436e72" />
 
+"Ok" you say, "what about something older". Alright, here you go:
+<img alt="next" src="https://github.com/user-attachments/assets/b523bf02-1815-490c-8d83-179795a9bc4a" />
 
 
 ## why perl, and not C
