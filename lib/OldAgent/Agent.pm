@@ -37,6 +37,8 @@ sub new {
         formatter => $a{formatter},          # optional: sub(visible_text) -> rendered
         token     => $a{token},              # optional: sub(piece) while streaming
         round     => $a{round},              # optional: sub(reply) per assistant turn
+        sysmsg    => $a{sysmsg},             # optional: sub(text) per user-role message
+                                             #   the loop pushes itself (results, nudges)
         history   => [],
         out       => $a{out} || \*STDOUT,
         approve   => $a{approve},          # code ref or undef
@@ -75,9 +77,11 @@ sub system_prompt {
     my $root = $cfg->get('root') || OldAgent::Util::cwd();
     my $s = "";
     $s .= "You are oldagent " . OldAgent::version() . ", an agent running on a "
-        . "real computer. You are NOT a chatbot: the way you act is by emitting "
-        . "tool calls, and the system executes them for you. Be brief and "
-        . "concrete. Prefer short commands and small edits.\n\n";
+        . "real computer. When the human asks for something to be done on this "
+        . "machine, you do it by emitting tool calls and the system executes "
+        . "them for you. When the human is just talking to you, answer in "
+        . "plain prose - no tool block needed. Be brief and concrete. Prefer "
+        . "short commands and small edits.\n\n";
     $s .= "Environment\n";
     $s .= "  host: " . (OldAgent::Util::uname() || 'unknown') . "\n";
     $s .= "  perl: $]\n";
@@ -101,8 +105,9 @@ sub system_prompt {
         $s .= "  - Never invent or predict a result. Ask, stop, and wait.\n";
         $s .= "  - Read before you write. Use edit for small changes, write for new files.\n";
         $s .= "  - Keep output small: read with from/lines, list with glob, find with a pattern.\n";
-        $s .= "  - When the task is finished, END your final reply with a done block: a single fenced tool block containing {\"tool\":\"done\",\"args\":{\"summary\":\"one paragraph\"}}.\n";
-        $s .= "  - Plain prose outside tool blocks is shown to the human.\n";
+        $s .= "  - When a task that used tools is finished, END your final reply with a done block: a single fenced tool block containing {\"tool\":\"done\",\"args\":{\"summary\":\"one paragraph\"}}.\n";
+        $s .= "  - Plain prose outside tool blocks is shown to the human. A conversational reply needs no tool block and no done block.\n";
+        $s .= "  - Only act on what the human asked for in this conversation. Do not go looking for other work.\n";
     } else {
         $s .= "You have no tools in this session. Answer in plain text only.\n";
     }
@@ -180,7 +185,19 @@ sub undo {
 sub ask {
     my ($self, $text) = @_;
     push @{ $self->{history} }, { role => 'user', content => $text };
+    $self->{no_tool} = 0;
     return $self->_loop();
+}
+
+# does a tool-less reply read like the model narrating a step it meant to
+# take ("Let me check...", "I'll read the file...")? that is a stall worth
+# a nudge. a plain answer ("Hey! What can I do for you?") is not.
+sub _looks_like_intent {
+    my ($text) = @_;
+    return 0 unless defined $text;
+    # "let me know" and "I'll be here" are sign-offs, not steps
+    return 1 if $text =~ /\b(?:let me(?! know)|let's|i'll(?! be\b)|i will(?! be\b)|i am going to|i'm going to|i need to|i should|first,? i|next,? i|now i)\b/i;
+    return 0;
 }
 
 sub _loop {
@@ -225,11 +242,12 @@ sub _loop {
         last unless $self->{tools_on};
         my $calls = OldAgent::Protocol::parse($reply);
         unless (@$calls) {
-            # the model replied without a tool call and without a done block,
-            # so nothing ran. that is a premature stop, not a finish - nudge
-            # it to emit its next action and keep the loop going, but give up
-            # after a few empty rounds so a stubborn model cannot run the
-            # budget down in a circle.
+            # the model replied without a tool call: that is the end of the
+            # turn - unless it is narrating a step instead of taking it
+            # ("Let me check the file..."). that is a stall: nudge it to
+            # act, but give up after a few empty rounds so a stubborn model
+            # cannot run the budget down in a circle.
+            last unless _looks_like_intent($reply);
             if ($self->{cfg}->get('no_tool_max', $NO_TOOL_MAX) >= 0) {
                 $self->{no_tool} = ($self->{no_tool} || 0) + 1;
                 if ($self->{no_tool} > $self->{cfg}->get('no_tool_max', $NO_TOOL_MAX)) {
@@ -238,6 +256,7 @@ sub _loop {
                 }
                 push @{ $self->{history} },
                     { role => 'user', content => _nudge(), nudge => 1 };
+                $self->{sysmsg}->(_nudge()) if ref($self->{sysmsg}) eq 'CODE';
                 next;
             }
             last;
@@ -254,6 +273,7 @@ sub _loop {
         }
         my $block = OldAgent::Protocol::results_block(\@results);
         push @{ $self->{history} }, { role => 'user', content => $block };
+        $self->{sysmsg}->($block) if ref($self->{sysmsg}) eq 'CODE';
         last if $finished;
     }
     return ($last, undef);

@@ -53,10 +53,15 @@ sub clip {
     $max = 4000 unless defined $max;
     return '' unless defined $s;
     return $s if length($s) <= $max;
+    # a short limit (a one-line summary in a transcript) is a plain
+    # truncation; keeping head AND tail there produced "d [... clipped 0
+    # chars ...] one summary=..." lines. only a long limit keeps a tail.
+    if ($max < 400) {
+        return substr($s, 0, ($max > 3 ? $max - 3 : $max)) . '...';
+    }
     my $keep = $max - 200;
-    $keep = 1 if $keep < 1;
     my $head = substr($s, 0, $keep);
-    my $tail = length($s) > $keep ? substr($s, -$keep < 0 ? 0 : -$keep) : '';
+    my $tail = substr($s, -$keep);
     my $gone = length($s) - length($head) - length($tail);
     $gone = 0 if $gone < 0;
     return $head . "\n[... clipped $gone chars ...]\n" . $tail;

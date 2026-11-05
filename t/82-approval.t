@@ -8,8 +8,10 @@
 # restores blocking line mode before the read.  This test puts the tty in that
 # raw+timeout state, feeds a "y", and checks the agent approves it.
 #
-# Needs a controlling tty:
-#   printf 'y\n' | script -qec 'perl t/82-approval.t' /dev/null
+# Needs a controlling tty, and asks for it explicitly: under `prove` in a
+# terminal it would otherwise read whatever the human types next as its
+# answer (it ate a queued command line on the HP-UX box that way):
+#   OA_TTY_TEST=1 printf 'y\n' | script -qec 'perl t/82-approval.t' /dev/null
 use strict;
 use warnings;
 use Test::More;
@@ -17,8 +19,8 @@ use FindBin;
 use lib "$FindBin::RealBin/../lib";
 
 # not worth running without a real terminal -- the point is tty behaviour
-unless (-t STDIN) {
-    plan skip_all => 'needs a controlling tty';
+unless (-t STDIN && $ENV{OA_TTY_TEST}) {
+    plan skip_all => 'needs a controlling tty and OA_TTY_TEST=1';
     exit 0;
 }
 plan tests => 2;

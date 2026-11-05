@@ -167,7 +167,9 @@ lib/OldAgent/Term.pm   a small line editor: history, arrows, wrapping
 lib/OldAgent/Desktop.pm  the optional Tk window
 lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
-t/                     269 tests, no network needed
+util/desk-trace.pl     drives the desktop through a conversation under xvfb
+                       and reports rebuilds, self-resizing, screen/history drift
+t/                     281 tests, no network needed
 ```
 
 ## oa-proxy: a bridge for machines that stopped in 2000
@@ -206,6 +208,41 @@ oa-proxy --port 8470 --mcp ~/.oldagent/mcp.json \
 ```
 
 ## changelog
+
+0.1.8
+- a reply with no tool call ends the turn. the loop only nudges the model
+  when it narrates a step instead of taking it ("Let me read the file
+  first..."); a chat answer is an answer, not a failure to act. the system
+  prompt no longer insists the model is not a chatbot.
+- desktop: `done` blocks and `result` fences are protocol, not transcript;
+  short one-line summaries no longer come out as `d [... clipped 0 chars
+  ...] one summary=...`; the second message no longer hangs on "Thinking";
+  a Stop button; bold, code and the other markdown tags actually render
+  (the tag list reached Tk as one joined name before).
+- desktop: tool calls are shown in full, results as a block of the first
+  20 lines. a bash call asks for approval in the window
+  (Allow / Always / Deny) instead of on the terminal the desktop was
+  started from, where nobody was looking - and the event pipe is now
+  actually non-blocking, so a waiting child no longer freezes the window.
+  the child gets its message on stdin instead of argv (the api key was
+  visible in `ps`).
+- desktop: no more flashing or self-resizing. the transcript is drawn
+  incrementally (one rebuild, at startup; the streamed reply grows in
+  place) and the window keeps the size you gave it.
+- desktop: plain text, no boxes - you in blue on the right, the agent in
+  plain text with the markdown, tool lines small and grey. one text
+  widget and tags, nothing measured: quick on a PA-RISC. (the widget
+  bubbles tried in between never shipped.)
+- desktop: `Commands > Show config` works (the captured-output handle
+  lacked `printf`).
+- a box without curl gets the one-shot reply without first trying to
+  stream (and without the "uninitialized value" warning it used to print).
+- an OpenAI-compatible `base_url` without `/v1` (ollama's
+  `http://host:11434`) works: a 404 makes oa retry under `/v1` and stay
+  there. the stream path used to turn that 404 into an empty reply.
+- HP-UX 11i / perl 5.8.8: the suite is green; the desktop tests skip
+  (instead of bailing the whole run) where there is no xvfb, and the tty
+  approval test is opt-in (`OA_TTY_TEST=1`).
 
 0.1.7
 - `oa-proxy`: a companion bridge service (modern perl) for legacy boxes with no

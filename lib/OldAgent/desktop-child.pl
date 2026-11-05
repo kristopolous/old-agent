@@ -3,12 +3,19 @@
 # execs this) so it never shares the parent's Tk/X11 state.
 #
 # Contract:
-#   argv: perl desktop-child.pl <libdir> <json-message>
+#   argv: perl desktop-child.pl <libdir>   (the json message is the first
+#         line on stdin - never argv, which `ps` shows to everyone, key
+#         included)
 #   out:  one JSON object per line (NDJSON), an event stream:
 #           {"type":"note","text":...}    a line the agent printed
 #                                         ([tool] calls, [oldagent] errors)
 #           {"type":"delta","text":...}   streamed piece of the model reply
 #           {"type":"round","text":...}   a full assistant reply, complete
+#           {"type":"umsg","text":...}    a user-role message the loop
+#                                         pushed itself (result, nudge)
+#           {"type":"ask","cmd":...}      bash wants approval: the parent
+#                                         writes y / a / n + newline to
+#                                         the child's stdin
 #           {"type":"final","ok":1,...}   done; carries the updated history
 # The message carries the prompt, the active settings, and the transcript
 # so far; final carries the updated transcript.
@@ -17,7 +24,10 @@ use warnings;
 my $libdir = shift @ARGV;
 my $data   = shift @ARGV;
 if (!defined $data || $data eq '') {
-    $data = do { local $/; <STDIN> } || '';
+    # one line: the message. stdin stays open afterwards for the
+    # approval answers, so this must not wait for EOF.
+    $data = <STDIN>;
+    $data = '' unless defined $data;
 }
 push @INC, $libdir if defined $libdir && length $libdir;
 require OldAgent::Config;
@@ -71,6 +81,20 @@ if (!$ag) {
 }
 @{ $ag->{history} } = @{ $in->{history} || [] };
 
+# bash approval: ask the window (an `ask` event) and wait for its one-line
+# answer on stdin - y / a (always) / n. without this the agent would ask
+# the terminal the desktop was started from, and sit there forever.
+$ag->{approve} = sub {
+    my ($cmd) = @_;
+    print OldAgent::JSON::encode({ type => 'ask', cmd => $cmd }), "\n";
+    my $ans = <STDIN>;
+    $ans = '' unless defined $ans;
+    $ans =~ s/\s+$//;
+    $ans = lc(substr($ans, 0, 1));
+    if ($ans eq 'a') { $cfg->set(approve => 'auto'); return 1 }
+    return $ans eq 'y' ? 1 : 0;
+};
+
 # every line the agent prints goes to the parent as a note event, live
 $| = 1;
 $ag->{out} = sub {
@@ -89,6 +113,13 @@ $ag->{token} = sub {
 $ag->{round} = sub {
     my $t = shift;
     print OldAgent::JSON::encode({ type => 'round', text => $t }), "\n";
+};
+# a user-role message the loop pushed itself (a result block, a nudge):
+# the parent draws it as it will draw the history later, so the final
+# history needs no redraw
+$ag->{sysmsg} = sub {
+    my $t = shift;
+    print OldAgent::JSON::encode({ type => 'umsg', text => $t }), "\n";
 };
 
 my ($reply, $err) = eval { $ag->ask($in->{text}) };

@@ -134,13 +134,17 @@ sub _via_proxy {
 # reads the response body line by line AS IT ARRIVES, calling on_line for
 # each. curl only (it is the one transport that can unbuffer). returns
 # { ok, lines, body, backend, error }.
+# can this machine stream at all? (curl is the only line-by-line
+# transport; a box without it gets the one-shot reply, quietly)
+sub can_stream { return OldAgent::Util::which('curl') ? 1 : 0 }
+
 sub stream_request {
     my (%a) = @_;
-    my $url = $a{url} or return { ok => 0, error => 'no url given' };
+    my $url = $a{url} or return { ok => 0, error => 'no url given', backend => 'curl' };
     my $on  = ref($a{on_line}) eq 'CODE' ? $a{on_line} : undef;
-    return { ok => 0, error => 'stream needs an on_line callback' } unless $on;
+    return { ok => 0, error => 'stream needs an on_line callback', backend => 'curl' } unless $on;
     my $bin = OldAgent::Util::which('curl');
-    return { ok => 0, error => 'streaming needs curl (not installed)' }
+    return { ok => 0, error => 'streaming needs curl (not installed)', backend => 'curl' }
         unless $bin;
     my $method  = uc(defined $a{method} ? $a{method} : 'POST');
     my $timeout = defined $a{timeout} ? $a{timeout} : 60;
@@ -150,7 +154,7 @@ sub stream_request {
     if (defined $a{body}) {
         $in = OldAgent::Util::tmpfile('sbody');
         my $err = OldAgent::Util::spew($in, $a{body});
-        return { ok => 0, error => $err } if $err;
+        return { ok => 0, error => $err, backend => 'curl' } if $err;
         push @argv, '--data-binary', '@' . $in;
     }
     for my $k (sort keys %{ $a{headers} || {} }) {
@@ -163,7 +167,7 @@ sub stream_request {
     my $pid = eval { IPC::Open2::open2($rd, $wr, @argv) };
     if (!$pid) {
         unlink($in) if defined $in;
-        return { ok => 0, error => 'cannot start curl: ' . ($@ || $!) };
+        return { ok => 0, error => 'cannot start curl: ' . ($@ || $!), backend => 'curl' };
     }
     close $wr;                        # close our write end: EOF when curl exits
     my @lines;

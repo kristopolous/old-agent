@@ -107,8 +107,12 @@ push @fail, 'model-persisted' unless $persisted =~ /model = new-model/;
 print "MODEL: now ", $cfg->get('model'), "  persisted: ",
       ($persisted =~ /model = new-model/ ? 'yes' : 'NO'), "\n";
 
-# ---- 6) run a menu command through the REPL handler ------------------
+# ---- 6) run menu commands through the REPL handler -------------------
+# (config and history printf; the capture handle must speak PRINTF)
 $app->_run_cmd('history');
+$app->_run_cmd('config');
+push @fail, 'config-cmd' unless $app->transcript_text =~ /^provider\s+echo/m;
+push @fail, 'config-err' if $app->transcript_text =~ /PRINTF|error:/;
 
 # ---- 7) send a message; echo provider, markdown gets tags -------------
 my $entry = $app->{entry};
@@ -165,10 +169,10 @@ push @fail, 'input-small'  if $g_eh < 24;
 
 # ---- 10) transcript + tags + status -----------------------------------
 my $txt = $app->{txt};
-print "CONTENT:\n", $txt->get('1.0', 'end'), "\n";
+print "CONTENT:\n", $app->transcript_text, "\n";
 my @tags = $txt->tag('names');
 print "TAGS: ", join(", ", sort @tags), "\n";
-my $body = $txt->get('1.0', 'end');
+my $body = $app->transcript_text;
 push @fail, 'mdbold' unless index($body, 'hello world') >= 0;
 push @fail, 'status' unless $app->{stat}->cget('-text') =~ /session/;
 

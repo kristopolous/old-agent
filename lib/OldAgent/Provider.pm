@@ -66,6 +66,8 @@ sub chat_stream {
     my $token = ref($a{token}) eq 'CODE' ? $a{token} : undef;
     my $kind = $self->kind;
     my ($text, $err);
+    # no curl (an old box): the one-shot reply, without trying first
+    $token = undef unless OldAgent::HTTP::can_stream();
     if (($kind eq 'openai' || $kind eq 'openai-compat') && $token) {
         ($text, $err) = $self->_openai_stream(%a);
         if ($err) { ($text, $err) = $self->_openai(%a) }   # fall back to one-shot
@@ -81,12 +83,33 @@ sub chat_stream {
     return ($text, $err);
 }
 
+# the OpenAI-dialect url for a path. an ollama base without /v1
+# (http://host:11434) serves the dialect only under /v1 and 404s above it;
+# once a 404 has taught us that, every later url carries the /v1.
+sub _oa_url {
+    my ($self, $path) = @_;
+    my $base = $self->{cfg}->get('base_url');
+    $base =~ s{/+$}{};
+    $base .= '/v1' if $self->{need_v1} && $base !~ m{/v1$};
+    return "$base$path";
+}
+
+# a 404 on a base without /v1: worth one retry under /v1
+sub _retry_under_v1 {
+    my ($self, $status) = @_;
+    return 0 unless defined $status && $status == 404;
+    return 0 if $self->{need_v1};
+    my $base = $self->{cfg}->get('base_url') || '';
+    return 0 if $base =~ m{/v1/?$};
+    $self->{need_v1} = 1;
+    return 1;
+}
+
 # ------------------------------------------------------------ streaming ---
 
 sub _openai_stream {
     my ($self, %a) = @_;
-    my $base = $self->{cfg}->get('base_url');
-    my $url  = "$base/chat/completions";
+    my $url  = $self->_oa_url('/chat/completions');
     my %payload = (
         model    => $self->{cfg}->get('model'),
         messages => [ { role => 'system',
@@ -101,6 +124,7 @@ sub _openai_stream {
 
     my $full = '';
     my $serr;
+    my $seen_data = 0;
     my $r = OldAgent::HTTP::stream_request(
         url     => $url,
         method  => 'POST',
@@ -111,6 +135,7 @@ sub _openai_stream {
             my ($line) = @_;
             return unless $line =~ /\S/;
             return unless $line =~ /^data:\s*(\[?\S.*)$/s;
+            $seen_data++;
             return if $1 =~ /^\s*\[/;            # [DONE] and friends
             my ($d, $derr) = OldAgent::JSON::decode($1);
             return if defined $derr;
@@ -131,7 +156,22 @@ sub _openai_stream {
     );
     if ($serr) { return (undef, $serr) }
     if ($r->{error} && !length $full) {
-        return (undef, "request to $url failed: " . $r->{error} . ' (via ' . $r->{backend} . ')');
+        return (undef, "request to $url failed: " . $r->{error}
+                     . ' (via ' . (defined $r->{backend} ? $r->{backend} : 'curl') . ')');
+    }
+    # a stream that never sent a data: line is an error page (curl -sS
+    # streams a 404 body like anything else), not an empty reply. say so,
+    # so the caller falls back to the one-shot request - which knows how
+    # to find the /v1 the base is missing.
+    if (!$seen_data) {
+        my $body = OldAgent::Util::clip(OldAgent::Util::one_line(defined $r->{body} ? $r->{body} : ''), 120);
+        # a 404 on a base without /v1: stream again under /v1. curl gives
+        # no status here and ollama's 404 body is empty, so "nothing at
+        # all came back" is the tell (a wrong guess costs one request and
+        # the one-shot fallback still runs after it)
+        return $self->_openai_stream(%a)
+            if ($body =~ /\b404\b/ || !length $body) && $self->_retry_under_v1(404);
+        return (undef, "request to $url returned no stream" . (length $body ? ": $body" : ''));
     }
     return ($full, undef);
 }
@@ -186,7 +226,8 @@ sub _ollama_stream {
     );
     if ($serr) { return (undef, $serr) }
     if ($r->{error} && !length $full) {
-        return (undef, "request to $url failed: " . $r->{error} . ' (via ' . $r->{backend} . ')');
+        return (undef, "request to $url failed: " . $r->{error}
+                     . ' (via ' . (defined $r->{backend} ? $r->{backend} : 'curl') . ')');
     }
     return ($full, undef);
 }
@@ -270,8 +311,7 @@ sub _post {
 
 sub _openai {
     my ($self, %a) = @_;
-    my $base = $self->{cfg}->get('base_url');
-    my $url  = "$base/chat/completions";
+    my $url  = $self->_oa_url('/chat/completions');
     my %payload = (
         model    => $self->{cfg}->get('model'),
         messages => [ { role => 'system',
@@ -285,6 +325,10 @@ sub _openai {
     $payload{max_tokens} = OldAgent::JSON::num($mt) if defined $mt && length $mt;
 
     my ($data, $err) = $self->_post($url, \%payload);
+    if ($err && $self->_retry_under_v1($self->{last_meta}{http})) {
+        $url = $self->_oa_url('/chat/completions');
+        ($data, $err) = $self->_post($url, \%payload);
+    }
     return (undef, $err) if $err;
     if (ref($data) eq 'HASH' && ref($data->{error}) eq 'HASH') {
         return (undef, 'api error: ' . ($data->{error}{message} || 'unknown'));
@@ -444,15 +488,22 @@ sub list_models {
         return (undef, "provider 'exec' has no model list; set model = by hand");
     }
     my $url = $kind eq 'ollama' && $base !~ m{/v1$} ? "$base/api/tags"
-                                                       : "$base/models";
+                                                       : $self->_oa_url('/models');
     my $style = ($kind eq 'anthropic') ? 'anthropic' : 'bearer';
-    my $r = OldAgent::HTTP::request(
-        url => $url, method => 'GET',
-        headers => $self->_headers(style => $style),
-        timeout => $self->{timeout}, backend => $self->{backend},
-        via_proxy => $self->{cfg}->get('proxy'),
-        cfg       => $self->{cfg},
-    );
+    my $get = sub {
+        OldAgent::HTTP::request(
+            url => $_[0], method => 'GET',
+            headers => $self->_headers(style => $style),
+            timeout => $self->{timeout}, backend => $self->{backend},
+            via_proxy => $self->{cfg}->get('proxy'),
+            cfg       => $self->{cfg},
+        );
+    };
+    my $r = $get->($url);
+    if ($kind ne 'ollama' && $self->_retry_under_v1($r->{status})) {
+        $url = $self->_oa_url('/models');
+        $r = $get->($url);
+    }
     return (undef, "GET $url failed: " . ($r->{error} || "http $r->{status}"))
         if !$r->{status} || $r->{status} < 200 || $r->{status} > 299;
     my ($data, $err) = OldAgent::JSON::decode($r->{body});

@@ -32,6 +32,12 @@ sub _decode {
     return $ok ? $u : $s;
 }
 
+# the look of the transcript: a white page, the human in blue, the
+# agent in plain text, and the one font everything shares
+my $PAGE_BG = '#ffffff';
+my $USER_FG = '#0b5cc4';
+my $FONT    = 'Helvetica 11';
+
 # ------------------------------------------------------------------ output
 
 # A tied handle: while it is the selected filehandle, every plain `print`
@@ -51,6 +57,8 @@ sub _put {
 sub PRINT { my ($s, @rest) = @_; $s->_put($_) for @rest; return 1 }
 # print HANDLE $scalar       -> WRITE, one call with the scalar
 sub WRITE { my ($s, $str) = @_; $s->_put($str); return 1 }
+# printf HANDLE fmt, ...     -> PRINTF (/config and /history use it)
+sub PRINTF { my ($s, $fmt, @rest) = @_; $s->_put(sprintf($fmt, @rest)); return 1 }
 sub CLOSE { return 1 }
 
 # ---------------------------------------------------------------- sessions
@@ -225,8 +233,8 @@ sub _build {
     my $vsb = $rw->Scrollbar(-bg => '#eeeeee')->pack(-side => 'right', -fill => 'y');
     my $txt = $rw->Text(
         -wrap   => 'word',
-        -font   => 'Helvetica 11',
-        -bg     => '#ffffff',
+        -font   => $FONT,
+        -bg     => $PAGE_BG,
         -fg     => '#111111',
         -height => 20,
         -width  => 40,
@@ -235,32 +243,28 @@ sub _build {
     )->pack(-side => 'top', -fill => 'both', -expand => 1);
     $vsb->configure(-command => [$txt, 'yview']);
 
+    # the markdown tags, straight on the transcript
     my %defs = OldAgent::Textfmt::tk_tagdefs();
     for my $name (sort keys %defs) {
-        my %o   = %{ $defs{$name} };
+        my %o = %{ $defs{$name} };
         my %opt;
-        $opt{-font}       = delete $o{font}      if defined $o{font};
-        $opt{-foreground} = delete $o{fg}        if defined $o{fg};
-        $opt{-background} = delete $o{bg}        if defined $o{bg};
-        $opt{-underline}  = delete $o{underline} if defined $o{underline};
-        $txt->tag('configure', $name, %opt);
+        $opt{-font}       = $o{font}      if defined $o{font};
+        $opt{-foreground} = $o{fg}        if defined $o{fg};
+        $opt{-background} = $o{bg}        if defined $o{bg};
+        $opt{-underline}  = $o{underline} if defined $o{underline};
+        $txt->tag('configure', $name, %opt) if %opt;
     }
-    # chat bubbles: user = blue bubble hugging the text, pushed to the
-    # right edge with spaces; agent = off-white bubble hugging the text on
-    # the left. (a -justify tag would paint its background across the whole
-    # display line - a band, not a bubble.) the spacing options pad INSIDE
-    # the bubble (spacing1 = top, spacing3 = bottom; spacing2 sits between
-    # wrapped lines of one logical line and does nothing for the box
-    # bottom). the bubble tags are created AFTER the markdown tags, so
-    # markdown backgrounds (code blocks) win over the bubble's.
-    $txt->tag('configure', 'userb', -spacing1 => 5, -spacing3 => 5,
-        -background => '#4c8bf5', -foreground => '#ffffff');
-    $txt->tag('configure', 'agb', -spacing1 => 5, -spacing3 => 5,
-        -background => '#f2f1ea');
-    $txt->tag('configure', 'tool',     -font => 'Helvetica 10', -foreground => '#777777');
-    $txt->tag('configure', 'sys',      -foreground => '#666666');
-    $txt->tag('configure', 'note',     -foreground => '#555555', -font => 'Helvetica 10 italic');
-    $txt->tag('configure', 'err',      -foreground => '#b00020');
+    # the human: blue, right-aligned. a thin blank line around a message
+    # (a tiny font, so the gap is a few pixels, not a whole text line)
+    $txt->tag('configure', 'user',    -foreground => $USER_FG, -justify => 'right');
+    $txt->tag('configure', 'gap',     -font => 'Helvetica 3');
+    $txt->tag('configure', 'tool',    -font => 'Helvetica 10', -foreground => '#777777',
+        -lmargin1 => 8, -lmargin2 => 48);
+    $txt->tag('configure', 'toolout', -font => 'Courier 10', -foreground => '#555555',
+        -lmargin1 => 24, -lmargin2 => 24);
+    $txt->tag('configure', 'sys',     -foreground => '#666666');
+    $txt->tag('configure', 'note',    -foreground => '#555555', -font => 'Helvetica 10 italic');
+    $txt->tag('configure', 'err',     -foreground => '#b00020');
     $self->{txt} = $txt;
 
     # a resize changes the bubble width: re-render the whole transcript
@@ -289,7 +293,12 @@ sub _build {
     # so everything here is a direct child of the root window, packed in
     # this order: status takes the bottom row, the buttons claim the right
     # of the row above it, and the entry fills the rest of that row.
-    my $stat = $rw->Label(-anchor => 'w',
+    # -width 1: the label asks for (almost) no width of its own and is
+    # stretched by -fill x. a label that asks for the width of its text
+    # grows the whole window when the text is long ("THINKING..." at the
+    # end of a busy status line) and shrinks it back when it is short:
+    # that was the "resize window" between every message and its reply.
+    my $stat = $rw->Label(-anchor => 'w', -width => 1,
         -bg => '#eeeeee', -fg => '#555555', -font => 'Helvetica 10', -padx => 8)
         ->pack(-side => 'bottom', -fill => 'x');
     # only Send sits beside the entry: Undo and Clear are conversation
@@ -298,6 +307,10 @@ sub _build {
     $self->{btn_send} = $rw->Button(-text => 'Send', -default => 'active',
         -command => sub { $self->_send })
         ->pack(-side => 'right', -padx => [2, 10], -pady => 6);
+    # Stop kills the agent child mid-turn; live only while one is running
+    $self->{btn_stop} = $rw->Button(-text => 'Stop', -state => 'disabled',
+        -command => sub { $self->_stop })
+        ->pack(-side => 'right', -padx => 2, -pady => 6);
     my $entry = $rw->Entry(-font => 'Helvetica 12', -relief => 'sunken', -bg => '#fffef5')
         ->pack(-side => 'bottom', -fill => 'x', -padx => [8, 4], -pady => 6);
     # in this Tk build the entry's natural height is a few px shorter than
@@ -307,6 +320,10 @@ sub _build {
     $rw->update;
     my $dh = $self->{btn_send}->winfo('height') - $entry->winfo('height');
     $entry->packConfigure(-ipady => int($dh / 2)) if $dh > 0;
+    # pin the size: from here on only the human (or the window manager)
+    # resizes this window, never a child widget's request
+    $rw->update;
+    $rw->geometry($rw->winfo('width') . 'x' . $rw->winfo('height'));
     $entry->bind('<Return>', sub { $self->_send });
     $entry->focus;
     $self->{entry} = $entry;
@@ -524,6 +541,53 @@ sub _ask {
     $e->focus;
 }
 
+# the model wants to run a bash command: Allow / Always / Deny. the child
+# is parked on its stdin until one line comes back, so the answer is
+# written there (y / a / n); Always also flips the setting for the rest
+# of the session.
+sub _approval_dialog {
+    my ($self, $cmd) = @_;
+    my $rw = $self->{root};
+    my $t = eval { $rw->Toplevel(-title => 'oldagent: allow this command?') };
+    if (!$t) { $self->_approval_answer('n'); return }
+    $self->{appr_dlg} = $t;
+    $t->Label(-text => 'the model wants to run this command:', -justify => 'left')
+        ->pack(-anchor => 'w', -padx => 12, -pady => [12, 4]);
+    my @lines = split(/\n/, $cmd);
+    my $h = @lines < 2 ? 2 : (@lines > 10 ? 10 : scalar @lines);
+    my $box = $t->Text(-height => $h, -width => 72, -font => 'Courier 10',
+        -wrap => 'word', -bg => '#f8f8f0', -relief => 'sunken')
+        ->pack(-fill => 'both', -expand => 1, -padx => 12, -pady => 4);
+    $box->insert('1.0', $cmd);
+    $box->configure(-state => 'disabled');
+    my $answer = sub {
+        my ($a) = @_;
+        $self->{appr_dlg} = undef;
+        $t->destroy;
+        $rw->after(10, sub { $self->_approval_answer($a) });
+    };
+    $t->Button(-text => 'Deny',   -command => sub { $answer->('n') })
+        ->pack(-side => 'right', -padx => [4, 12], -pady => 10);
+    $t->Button(-text => 'Always', -command => sub { $answer->('a') })
+        ->pack(-side => 'right', -padx => 4, -pady => 10);
+    $t->Button(-text => 'Allow',  -command => sub { $answer->('y') })
+        ->pack(-side => 'right', -padx => 4, -pady => 10);
+    $t->bind('<Return>', sub { $answer->('y') });
+    $t->bind('<Escape>', sub { $answer->('n') });
+    $t->protocol('WM_DELETE_WINDOW', sub { $answer->('n') });
+}
+
+sub _approval_answer {
+    my ($self, $a) = @_;
+    my $fh = $self->{ask_wr} or return;
+    print $fh "$a\n";
+    if ($a eq 'a') {
+        $self->{appr_var} = 'auto';
+        $self->_set_approve('auto');
+    }
+    $self->_append_item(['note', $a eq 'n' ? 'denied' : 'allowed']);
+}
+
 # a read-only text window
 sub _show_text {
     my ($self, $title, $body) = @_;
@@ -554,18 +618,20 @@ sub _send {
     $self->{entry}->delete(0, 'end');
     return if $self->{busy};
 
-    push @{ $self->{feed} }, ['user', $text];
-    $self->_render_all();
+    # the first message replaces the welcome text
+    $self->{txt}->delete('1.0', 'end')
+        if !@{ $self->{agent}->history() } && !@{ $self->{feed} };
+    $self->_append_item(['user', $text]);
 
     # The model call runs in a SEPARATE PROCESS. This Tk build's main loop
     # is the only thing that can process events; a blocking ask() in it is
     # a frozen window (dead buttons, no repaint). So we fork+exec a fresh
     # perl that rebuilds the agent from the same settings and transcript,
     # answers, and pipes one JSON line back. The parent keeps pumping
-    # events the whole time. The message travels by argv, the answer by a
-    # single pipe on the child's stdout.
-    my ($rd, $wr);
-    pipe($rd, $wr) or do {
+    # events the whole time. The message goes down the child's stdin,
+    # the events come back up its stdout, one JSON line each.
+    my ($rd, $wr, $ird, $iwr);
+    (pipe($rd, $wr) && pipe($ird, $iwr)) or do {
         my $e = $!;
         push @{ $self->{feed} }, ['err', "error: cannot spawn agent: $e"];
         $self->_render_all();
@@ -588,6 +654,7 @@ sub _send {
     # rebuilds the agent from this, so a key left out here (api_key,
     # max_tokens, thinking, timeout, ...) silently falls back to its default
     # and the request goes out wrong - e.g. unauthenticated to a proxy.
+    # (one line of JSON: it travels down a pipe, line by line)
     my $msg = OldAgent::JSON::encode({
         text       => $text,
         cfg        => $self->{agent}{cfg}->all(),
@@ -605,25 +672,43 @@ sub _send {
         return;
     }
     if ($kid == 0) {
-        # child: its stdout becomes the answer pipe; drop the read end and
-        # the parent's write-end copy; exec a clean perl (no Tk, no X).
-        open(STDOUT, '>&=', $wr) or exit 9;
-        close $rd;
-        close $wr;
-        exec('perl', $child, $libdir, $msg) or exit 9;
+        # child: its stdout becomes the event pipe and its stdin the answer
+        # pipe (approval replies); drop the other ends; exec a clean perl
+        # (no Tk, no X).
+        open(STDOUT, '>&=', $wr)  or exit 9;
+        open(STDIN,  '<&=', $ird) or exit 9;
+        close $rd; close $wr; close $ird; close $iwr;
+        exec('perl', $child, $libdir) or exit 9;
         exit 9;
     }
     close $wr;
-    # non-blocking read end: sysread must never hold up the Tk event loop
+    close $ird;
+    { my $prev = select($iwr); $| = 1; select($prev) }
+    $self->{ask_wr} = $iwr;
+    # the message goes down the child's stdin as its first line (argv
+    # would show the api key to every user on the box); the child reads
+    # it as soon as it starts, so a long transcript cannot wedge us here
+    print $iwr $msg, "\n";
+    # non-blocking read end: sysread must never hold up the Tk event loop.
+    # (fcntl is a perl builtin; a Fcntl::fcntl() call inside an eval used
+    # to fail silently here, so the read blocked the whole window until
+    # the child wrote something - and a child waiting for an approval
+    # answer never does: a deadlock.)
     if (eval { require Fcntl; 1 }) {
-        my $fl = eval { Fcntl::fcntl($rd, Fcntl::F_GETFL(), 0) };
-        eval { Fcntl::fcntl($rd, Fcntl::F_SETFL(), $fl | Fcntl::O_NONBLOCK()) } if defined $fl;
+        my $fl = fcntl($rd, Fcntl::F_GETFL(), 0);
+        if (defined $fl) {
+            fcntl($rd, Fcntl::F_SETFL(), $fl | Fcntl::O_NONBLOCK())
+                or push @{ $self->{feed} }, ['err', "warning: cannot make the agent pipe non-blocking: $!"];
+        }
     }
-    $self->{busy}    = 1;
+    $self->{busy}     = 1;
     $self->{btn_send}->configure(-state => 'disabled', -text => 'Thinking');
-    $self->{acc}     = '';
-    $self->{ask_rd}  = $rd;
-    $self->{ask_kid} = $kid;
+    $self->{btn_stop}->configure(-state => 'normal');
+    $self->{acc}      = '';
+    $self->{ask_rd}   = $rd;
+    $self->{ask_kid}  = $kid;
+    $self->{ask_text} = $text;
+    $self->{ask_final_seen} = 0;
     $self->_status('busy');
     $self->{root}->after(50, sub { $self->_ask_poll() });
 }
@@ -681,31 +766,41 @@ sub _ask_event {
         return;
     }
     my $type = $ev->{type} || 'final';        # no type: one-shot legacy line
+    # every event is drawn where it lands: appended, or grown in place.
+    # the transcript is never rebuilt for an event - a rebuild destroys
+    # and recreates every bubble widget, and that is a visible flash.
     if ($type eq 'note') {
         my $t = _decode(defined $ev->{text} ? $ev->{text} : '');
         return unless length $t;
-        push @{ $self->{feed} }, ['note', $t];
-        $self->_render_all();
+        # the terminal's "[tool] name args..." progress lines: the round
+        # event renders the call in full a moment later, so these would
+        # only double it (with the terminal's ellipsis, too)
+        return if $t =~ /^\[tool\] /;
+        $self->_append_item(['note', $t]);
     }
     elsif ($type eq 'delta') {
-        my $t = _decode(defined $ev->{text} ? $ev->{text} : '');
+        my $t = defined $ev->{text} ? $ev->{text} : '';
         return unless length $t;
-        my $f = $self->{feed};
-        if (@$f && $f->[-1][0] eq 'live') { $f->[-1][1] .= $t }
-        else                              { push @$f, ['live', $t] }
-        $self->_render_all();
+        $self->_live_append($t);
+    }
+    elsif ($type eq 'umsg') {
+        # a user-role message the agent pushed itself (a tool result
+        # block, a nudge): drawn exactly as the history will draw it
+        my $t = defined $ev->{text} ? $ev->{text} : '';
+        $self->_append_item(['umsg', $t]) if length $t;
+    }
+    elsif ($type eq 'ask') {
+        # the child wants a bash command approved; it is blocked on its
+        # stdin until the human answers through the window
+        my $cmd = _decode(defined $ev->{cmd} ? $ev->{cmd} : '');
+        $self->_approval_dialog($cmd);
     }
     elsif ($type eq 'round') {
-        # the streamed bubble (if any) is raw tokens; swap it in place for
-        # the finished reply, which renders as a markdown bubble + tool lines
+        # the streamed bubble (if any) is raw tokens: take it off the end
+        # and draw the finished reply (markdown bubble + tool lines) in
+        # its place. nothing above it is touched.
         my $t = _decode(defined $ev->{text} ? $ev->{text} : '');
-        my $f = $self->{feed};
-        my $swapped = 0;
-        for (my $i = $#$f; $i >= 0 && !$swapped; $i--) {
-            if ($f->[$i][0] eq 'live') { $f->[$i] = ['assistant', $t]; $swapped = 1 }
-        }
-        push @$f, ['assistant', $t] unless $swapped;
-        $self->_render_all();
+        $self->_replace_live($t);
     }
     elsif ($type eq 'final') {
         $self->_ask_final($ev);
@@ -717,6 +812,8 @@ sub _ask_final {
     return if $self->{ask_final_seen};
     $self->{ask_final_seen} = 1;
     if (defined $self->{ask_rd}) { close $self->{ask_rd}; $self->{ask_rd} = undef }
+    if (defined $self->{ask_wr}) { close $self->{ask_wr}; $self->{ask_wr} = undef }
+    if ($self->{appr_dlg}) { eval { $self->{appr_dlg}->destroy }; $self->{appr_dlg} = undef }
     if (defined $self->{ask_kid}) {
         my $w = 1;
         while ($w && ($w = waitpid($self->{ask_kid}, 1)) > 0) {}   # reap
@@ -724,9 +821,13 @@ sub _ask_final {
     }
     $self->{busy} = 0;
     $self->{btn_send}->configure(-state => 'normal', -text => 'Send');
+    $self->{btn_stop}->configure(-state => 'disabled');
 
-    # fold the child's conversation back in (it ran with our history);
-    # the feed is what the child already produced, so it is absorbed too
+    # fold the child's conversation back in (it ran with our history).
+    # what is on screen was drawn from the events as they came, and the
+    # history renders to exactly the same thing - so NO redraw here: that
+    # rebuild was the flash at the end of every turn.
+    my $redraw = 0;
     if (ref($msg->{history}) && @{$msg->{history}}) {
         $self->{agent}{history} = [ map { { role => $_->{role}, content => $_->{content} } } @{ $msg->{history} } ];
         $self->{feed} = [];
@@ -738,18 +839,45 @@ sub _ask_final {
         unless ($rendered) {
             push @{ $self->{feed} },
                 ['err', _decode(defined $msg->{err} ? $msg->{err} : 'unknown')];
+            $redraw = 1;
         }
     }
-    $self->_render_all();
+    $self->_render_all() if $redraw;
     $self->_status();
+}
+
+# the human pressed Stop: kill the child and keep what is on screen. the
+# message and whatever streamed back so far go into the history as they
+# stand, so the transcript stays honest and the next message continues
+# from here.
+sub _stop {
+    my ($self) = @_;
+    return unless $self->{busy};
+    kill('TERM', $self->{ask_kid}) if defined $self->{ask_kid};
+    my @h = map { { role => $_->{role}, content => $_->{content} } }
+            @{ $self->{agent}{history} };
+    push @h, { role => 'user', content => $self->{ask_text} }
+        if defined $self->{ask_text} && length $self->{ask_text};
+    my $live = '';
+    for my $it (@{ $self->{feed} }) {
+        $live = $it->[1] if $it->[0] eq 'live' || $it->[0] eq 'assistant';
+    }
+    push @h, { role => 'assistant', content => $live } if length $live;
+    $self->_ask_final({ ok => 1, history => \@h });
+    push @{ $self->{feed} }, ['note', '(stopped)'];
+    $self->_render_all();
 }
 
 # ---------------------------------------------------------------- render --
 # the transcript is a pure function of (history, feed). feed holds what
 # has not been folded into the history yet: /command output, notes, the
-# in-flight user message, the live streamed bubble. re-rendering the whole
-# thing is what keeps the bubbles honest across a resize - every user
-# bubble is re-padded for the new width.
+# in-flight user message, the live streamed reply.
+#
+# it is ONE text widget and nothing but tags: the human's lines are blue
+# and right-aligned, the agent's are plain with the markdown tags, tool
+# lines are small and grey. no boxes, no backgrounds, no widgets per
+# message, nothing measured - Tk wraps the text itself. that is what
+# keeps it quick on a machine from the last century.
 
 sub _render_all {
     my ($self) = @_;
@@ -757,13 +885,9 @@ sub _render_all {
     $self->{rendering} = 1;
     my $txt = $self->{txt};
     $self->{last_width} = $txt->winfo('width');
-
-    # measure every user bubble we are about to draw (in isolation, on
-    # line 1) so the right-push is arithmetic, not a live probe. this
-    # leaves the transcript empty; the rebuild below fills it back in.
-    $self->_ensure_bubble_widths($self->_collect_user_bubble_lines());
-
     $txt->delete('1.0', 'end');
+    $self->{live} = 0;
+
     my @h = @{ $self->{agent}->history() };
     if (!@h && !@{ $self->{feed} }) {
         my $prov  = $self->{cfg}->get('provider');
@@ -789,25 +913,12 @@ sub _render_all {
     $self->{rendering} = 0;
 }
 
-# the bubble line strings currently on screen (history + feed), so the
-# measurement pass knows exactly what to measure before the rebuild.
-sub _collect_user_bubble_lines {
-    my ($self) = @_;
-    my @lines;
-    for my $m (@{ $self->{agent}->history() }) {
-        next unless ($m->{role} || '') eq 'user';
-        next unless defined $m->{content};
-        my $c = _decode($m->{content});
-        next unless $self->_is_user_bubble($c);
-        push @lines, $self->_bubble_lines($c);
-    }
-    for my $it (@{ $self->{feed} }) {
-        next unless $it->[0] eq 'user';
-        my $c = _decode($it->[1]);
-        next unless $self->_is_user_bubble($c);
-        push @lines, $self->_bubble_lines($c);
-    }
-    return @lines;
+# add one item to the feed and draw it at the end of the transcript
+sub _append_item {
+    my ($self, $it) = @_;
+    push @{ $self->{feed} }, $it;
+    $self->_render_item($it);
+    $self->{txt}->see('end');
 }
 
 # one feed item: [type, payload]
@@ -818,18 +929,63 @@ sub _render_item {
     if ($type eq 'user' || $type eq 'assistant') {
         $self->_render_msg($type, $p);
     }
+    elsif ($type eq 'umsg') {
+        $self->_render_msg('user', $p);
+    }
     elsif ($type eq 'live') {
-        # the raw streamed bubble; the round event re-renders it properly
-        my $t = _decode($p);
-        $txt->insert('end', $t, 'agb');
+        # the raw streamed reply; the round event replaces it. the mark
+        # remembers where it starts so the round can cut it out.
+        $txt->markSet('live_at', $txt->index('end-1c'));
+        $txt->markGravity('live_at', 'left');
+        $txt->insert('end', _decode($p), ['plain']);
         $txt->insert('end', "\n", 'plain');
+        $self->{live} = 1;
     }
     elsif ($type eq 'err') {
         $txt->insert('end', _decode($p) . "\n", 'err');
     }
-    else {    # note / sys: quiet lines between the bubbles
+    else {    # note / sys: quiet lines between the messages
         $txt->insert('end', _decode($p) . "\n", 'sys');
     }
+}
+
+# a streamed piece arrives: add it to the live reply in place
+sub _live_append {
+    my ($self, $t) = @_;
+    my $f = $self->{feed};
+    if (@$f && $f->[-1][0] eq 'live' && $self->{live}) {
+        $f->[-1][1] .= $t;
+        my $txt = $self->{txt};
+        # before the newline that ends the live text, not at 'end'
+        $txt->insert('end-2c', _decode($t), ['plain']);
+        $txt->see('end');
+        return;
+    }
+    if (@$f && $f->[-1][0] eq 'live') {
+        # a live item with no text on screen (after a rebuild mid-stream)
+        $f->[-1][1] .= $t;
+        $self->_render_all();
+        return;
+    }
+    $self->_append_item(['live', $t]);
+}
+
+# the round event: the streamed text (if any) comes off the end and the
+# finished reply (markdown, tool lines) goes in its place
+sub _replace_live {
+    my ($self, $text) = @_;
+    my $f = $self->{feed};
+    if (@$f && $f->[-1][0] eq 'live') {
+        pop @$f;
+        if ($self->{live}) {
+            # up to end-1c, not end: a range that includes the widget's
+            # undeletable final newline makes Tk delete the newline BEFORE
+            # the range instead - the one that ends the line above
+            $self->{txt}->delete('live_at', 'end-1c');
+            $self->{live} = 0;
+        }
+    }
+    $self->_append_item(['assistant', $text]);
 }
 
 sub _render_msg {
@@ -838,61 +994,48 @@ sub _render_msg {
     $text = _decode($text);
     if ($role eq 'user') {
         # tool results and nudges are protocol traffic, not things the human
-        # typed: give each result a single unobtrusive line instead of the
-        # raw JSON, and skip internal nudges entirely.
+        # typed: give each result a quiet line or two instead of the raw
+        # JSON, and skip internal nudges entirely.
         if ($text =~ /^```result\b/s) {
-            $self->_render_results($text);
+            # the body only: the fence lines are not results
+            my (undef, undef, $results) = OldAgent::Protocol::visible($text);
+            $self->_render_results($results);
             return;
         }
         if ($text =~ /No tool call was emitted, so nothing was executed/) {
             $txt->insert('end', "  (kept the model moving - no action yet)\n", 'note');
             return;
         }
-        $self->_render_user_bubble($text);
+        $self->_render_user($text);
     } else {
         # the assistant's tool/result fences are protocol, not prose: show
-        # the prose as an off-white bubble and one quiet line per tool call
+        # the prose as text and one quiet line per tool call
         my ($prose, $tools, $results) = OldAgent::Protocol::visible($text);
+        if (!length OldAgent::Util::strip($prose)) {
+            # a bare done block: its summary is the reply
+            my $summary = _done_summary($tools);
+            $prose = $summary if defined $summary;
+        }
         if (length OldAgent::Util::strip($prose)) {
-            $self->_render_md($prose, 'agb');
+            $self->_render_md($prose);
         }
         $self->_render_tools($tools) if length OldAgent::Util::strip($tools);
         $self->_render_results($results) if length OldAgent::Util::strip($results);
     }
 }
 
-# a blue bubble hugging the text, pushed to the right edge with spaces.
-# the leading spaces are plain (the transcript's white background shows
-# through), and only the bubble itself carries the blue tag - so the
-# bubble hugs its text instead of painting a band across the line.
-# each line pads itself, so even a multi-line message keeps its right edge
-# correct; a line wider than the window simply wraps like any other text
-sub _render_user_bubble {
+# the human's message: blue, on the right. the tag covers the newline
+# too, so the justify applies to the whole (possibly wrapped) line; with
+# no background there is no band to worry about.
+sub _render_user {
     my ($self, $text) = @_;
     my $txt = $self->{txt};
-    my $tab = $self->_bubble_table();
-    my $cap = defined $tab->{_cap} ? $tab->{_cap} : 0;
-    my $sp  = (defined $tab->{_sp} && $tab->{_sp} > 0) ? $tab->{_sp} : 4;
-    for my $line (split(/\n/, $text, -1)) {
-        my $bubble = ' ' . $line . ' ';
-        my $lead   = 0;
-        my $e      = $tab->{$bubble};
-        if ($e && $e->[1]) {                 # fits one line: push it right
-            $lead = int(($cap - $e->[0]) / $sp);
-            $lead -= 2;                      # safety margin: a bubble sitting
-            $lead = 0 if $lead < 0;          # exactly on the line capacity wraps
-        }
-        $txt->insert('end', ' ' x $lead);
-        # tag the bubble text but NOT the newline: a tag that covers the
-        # end-of-line newline paints its background across the whole
-        # display line (a band). leaving the newline untagged keeps the
-        # bubble hugging its text.
-        $txt->insert('end', $bubble, 'userb');
-        $txt->insert('end', "\n");
-    }
+    $txt->insert('end', "\n", 'gap');
+    $txt->insert('end', $text . "\n", 'user');
+    $txt->insert('end', "\n", 'gap');
 }
 
-# is a user message a bubble (vs a tool result / an internal nudge)?
+# is a user message the human's (vs a tool result / an internal nudge)?
 sub _is_user_bubble {
     my ($self, $text) = @_;
     return 0 if $text =~ /^```result\b/s;
@@ -900,95 +1043,51 @@ sub _is_user_bubble {
     return 1;
 }
 
-# the bubble line strings a user message renders as (with the one-space
-# padding each side the bubble carries), so measurement and render agree
-# on exactly what is being measured.
-sub _bubble_lines {
+# the agent's prose: markdown, straight into the transcript. fence lines
+# (```perl / ```) are markup, not content; the code block's own
+# background marks it out.
+sub _render_md {
     my ($self, $text) = @_;
-    return map { ' ' . $_ . ' ' } split(/\n/, $text, -1);
-}
-
-# cache of measured bubble widths, keyed by the transcript's pixel width
-# (a resize invalidates it) and then by the exact bubble string.
-sub _bubble_table {
-    my ($self) = @_;
-    my $w = $self->{txt}->winfo('width');
-    $self->{bub}     = {}  unless defined $self->{bub};
-    $self->{bub}{$w} = {}  unless defined $self->{bub}{$w};
-    return $self->{bub}{$w};
-}
-
-# make sure every bubble line about to be drawn has a cached [width, fits]
-# entry. each measurement is done in isolation on line 1 of the transcript
-# (always visible, so bbox is valid) and the transcript is wiped back to
-# empty afterwards - the caller re-renders the real content next. this is
-# the only way that survives this Tk build: probing at 'end' and deleting
-# with a computed index both silently fail, leaving thousands of spaces.
-sub _ensure_bubble_widths {
-    my ($self, @lines) = @_;
-    my $tab = $self->_bubble_table();
-    $self->_measure_geom($tab)
-        unless defined $tab->{_cap} && defined $tab->{_sp};
-    my %seen;
-    for my $l (@lines) {
-        next if $seen{$l}++;
-        next if defined $tab->{$l};
-        $tab->{$l} = $self->_measure_bubble($l);
-    }
-}
-
-# one-time (per width) geometry: the pixel width of a full display line
-# and the pixel width of a single space, measured with runs of spaces so
-# there is no proportional-font guesswork.
-sub _measure_geom {
-    my ($self, $tab) = @_;
     my $txt = $self->{txt};
-    $txt->delete('1.0', 'end');
-    # capacity: space-separated tokens so word-wrap CAN break the line.
-    # a run of bare spaces is one unbreakable word and never wraps, so the
-    # scan would walk off-screen and bbox would clip to a bogus width.
-    $txt->insert('end', ('x ' x 200) . "\n");
-    $self->{root}->update;
-    my @f = eval { $txt->bbox('1.0') };
-    if (@f == 4) {
-        my $y0  = $f[1];
-        my $cap = 0;
-        for my $i (1 .. 400) {
-            my @b = eval { $txt->bbox('1.' . ($i - 1)) };
-            last if @b < 4 || $b[1] != $y0;
-            $cap = $b[0] + $b[2];
+    for my $line (OldAgent::Textfmt::tokens(_decode($text))) {
+        next if @$line == 1 && grep({ $_ eq 'codeblock' } @{ $line->[0][0] })
+             && $line->[0][1] =~ /^\s*(?:```+|~~~+)[\w+-]*\s*$/;
+        for my $tok (@$line) {
+            my ($tags, $str) = @$tok;
+            next unless defined $str && length $str;
+            # the tag list goes as an ARRAY: a joined "plain,bold" string
+            # is one tag of that name to Tk, and nothing renders
+            $txt->insert('end', $str, [ @$tags ]);
         }
-        $tab->{_cap} = $cap;
+        $txt->insert('end', "\n", 'plain');
     }
-    $txt->delete('1.0', 'end');
-    $txt->insert('end', (' ' x 40) . "\n");
-    $self->{root}->update;
-    my @sf = eval { $txt->bbox('1.0') };
-    my @sl = eval { $txt->bbox('1.39') };
-    $tab->{_sp} = (@sf == 4 && @sl == 4)
-        ? (($sl[0] + $sl[2] - $sf[0]) / 40) : 4;
-    $txt->delete('1.0', 'end');
 }
 
-# measure one bubble on line 1: its pixel width and whether it fits on a
-# single display line (first and last char share a y0). a bubble wider
-# than the line fits=0 and gets no right push (it wraps like normal text).
-sub _measure_bubble {
-    my ($self, $l) = @_;
-    my $txt = $self->{txt};
-    $txt->delete('1.0', 'end');
-    $txt->insert('end', $l . "\n");
-    $self->{root}->update;
-    my $n  = length $l;
-    my @f  = eval { $txt->bbox('1.0') };
-    my @la = eval { $txt->bbox('1.' . ($n - 1)) };
-    my $w  = (@f == 4 && @la == 4) ? ($la[0] + $la[2] - $f[0]) : 0;
-    my $ok = (@f == 4 && @la == 4) ? ($f[1] == $la[1] ? 1 : 0) : 0;
-    $txt->delete('1.0', 'end');
-    return [$w, $ok];
+# everything on screen as plain text (the smoke test and the diagnostics
+# read this)
+sub transcript_text {
+    my ($self) = @_;
+    return $self->{txt}->get('1.0', 'end-1c');
 }
 
-# one quiet line per tool call:  [tool] read  path=fruits.txt
+# the summary of a done block among the tool lines, if there is one
+sub _done_summary {
+    my ($tools) = @_;
+    for my $t (split(/\n/, defined $tools ? $tools : '')) {
+        my ($d, $err) = OldAgent::JSON::decode($t);
+        next if $err || ref($d) ne 'HASH' || !defined $d->{tool};
+        next unless lc($d->{tool}) eq 'done';
+        my $a = ref($d->{args}) eq 'HASH' ? $d->{args} : {};
+        my $s = defined $a->{summary} ? $a->{summary} : $a->{message};
+        return $s if defined $s && !ref $s && length $s;
+    }
+    return undef;
+}
+
+# one quiet line per tool call, the call in full:
+#   [tool] bash  uname -a && cat /etc/os-release
+# a long command wraps under itself; only a file body (write/edit
+# content) is summarised, as its size.
 sub _render_tools {
     my ($self, $tools) = @_;
     my $txt = $self->{txt};
@@ -996,32 +1095,38 @@ sub _render_tools {
         next unless length $t;
         my ($d, $err) = OldAgent::JSON::decode($t);
         if (!$err && ref($d) eq 'HASH' && defined $d->{tool}) {
-            # collapse to one quiet line: [tool] read  path=fruits.txt
+            # done is the model signing off, not an action worth a line
+            next if lc($d->{tool}) eq 'done';
             my $name = $d->{tool};
             my $arg  = $d->{args};
-            my $brief = '';
+            my @bits;
             if (ref($arg) eq 'HASH') {
-                my @bits;
                 for my $k (sort keys %$arg) {
                     my $v = $arg->{$k};
                     next unless defined $v && !ref $v;
-                    $v = OldAgent::Util::one_line(OldAgent::Util::strip("$v"));
-                    $v = OldAgent::Util::clip($v, 40);
-                    push @bits, "$k=$v";
+                    $v = OldAgent::Util::strip("$v");
+                    if ($k eq 'content' || $k eq 'text' || $k eq 'new') {
+                        push @bits, "$k=(" . length($v) . " chars)";
+                    } elsif ($k eq 'cmd' || $k eq 'command') {
+                        unshift @bits, $v;          # the command itself, bare
+                    } else {
+                        push @bits, "$k=$v";
+                    }
                 }
-                $brief = '  ' . join(' ', @bits) if @bits;
             }
-            my $line = OldAgent::Util::clip("$name$brief", 110);
-            $txt->insert('end', '  [tool] ' . _decode($line) . "\n", 'tool');
+            $txt->insert('end', "[tool] $name" . (@bits ? '  ' . join(' ', @bits) : '') . "\n",
+                'tool');
         } else {
             # not JSON (e.g. an <function=...> summary line): show as-is
-            my $line = OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($t)), 110);
-            $txt->insert('end', '  [tool] ' . _decode($line) . "\n", 'tool');
+            $txt->insert('end', '[tool] ' . _decode(OldAgent::Util::strip($t)) . "\n", 'tool');
         }
     }
 }
 
-# one quiet line per tool result:  [read] ok - 12 bytes
+# a tool result: one status line, then the output as a quiet block.
+# the first lines are shown in full width; a long output is cut by LINES,
+# with a count of what was left out.
+my $RESULT_LINES = 20;
 sub _render_results {
     my ($self, $results) = @_;
     my $txt = $self->{txt};
@@ -1029,39 +1134,21 @@ sub _render_results {
         next unless length $r;
         my ($d, $err) = OldAgent::JSON::decode($r);
         if (!$err && ref($d) eq 'HASH' && defined $d->{tool}) {
+            next if lc($d->{tool}) eq 'done';     # the summary was the reply
             my $out = defined $d->{output} ? $d->{output} : '';
-            my $note = $d->{ok}
-                ? 'ok' . (length OldAgent::Util::strip($out) ? ' - ' . OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($out)), 70) : '')
-                : 'failed' . (length $out ? ' - ' . OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($out)), 70) : '');
-            $txt->insert('end', '  [' . $d->{tool} . '] ' . _decode($note) . "\n", 'tool');
+            $out = OldAgent::Util::strip($out);
+            $txt->insert('end', '[' . $d->{tool} . '] ' . ($d->{ok} ? 'ok' : 'failed')
+                . (length $out ? '' : ' (no output)') . "\n", 'tool');
+            next unless length $out;
+            my @lines = split(/\n/, $out, -1);
+            my $more = @lines > $RESULT_LINES ? @lines - $RESULT_LINES : 0;
+            splice(@lines, $RESULT_LINES) if $more;
+            $txt->insert('end', _decode(join("\n", @lines)) . "\n", 'toolout');
+            $txt->insert('end', "($more more lines)\n", 'tool') if $more;
             next;
         }
-        $txt->insert('end', '  [tool] ' . _decode(OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($r)), 110)) . "\n", 'tool');
+        $txt->insert('end', '[tool] ' . _decode(OldAgent::Util::strip($r)) . "\n", 'tool');
     }
-}
-
-sub _render_md {
-    my ($self, $text, $bubble) = @_;
-    my $txt = $self->{txt};
-    # a bubble tag only paints the cells it owns, so the bubble hugs the
-    # text by construction. the padding spaces (first and last cell of
-    # every line) carry the bubble tag too, which keeps the text off the
-    # bubble's edges and gives short last lines a padded right side
-    for my $line (OldAgent::Textfmt::tokens(_decode($text))) {
-        if ($bubble) { $txt->insert('end', ' ', $bubble) }
-        for my $tok (@$line) {
-            my ($tags, $str) = @$tok;
-            next unless defined $str && length $str;
-            $txt->insert('end', $str, join(',', @$tags));
-        }
-        # the trailing padding space carries the bubble tag, but the
-        # newline is left untagged so the bubble hugs its text instead of
-        # painting a band to the right edge (a tag over the newline fills
-        # the whole display line in Tk).
-        if ($bubble) { $txt->insert('end', ' ', $bubble); $txt->insert('end', "\n") }
-        else         { $txt->insert('end', "\n", 'plain') }
-    }
-    $txt->see('end');
 }
 
 # repaint the whole transcript (new session, undo, load, clear)

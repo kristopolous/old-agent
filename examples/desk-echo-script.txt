@@ -1,0 +1,20 @@
+I'll list the directory first.
+```tool
+{"tool":"list","args":{"path":"."}}
+```
+----
+Now the date, with a bash command that is long enough to wrap in the transcript line.
+```tool
+{"tool":"bash","args":{"cmd":"date '+%A %d %B %Y' && uname -a && cat /etc/os-release | head -3"}}
+```
+----
+The directory is empty, and you denied the date command - fair enough.
+
+Here is **bold**, *italic* and `inline code`, then a block:
+
+```sh
+perl -e 'print "hello, world\n"'
+```
+
+- a list item
+- another one, long enough that it has to wrap around inside the two-thirds box at least once

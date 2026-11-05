@@ -149,7 +149,9 @@ sub _normalize {
     # "arguments": "..."}}. arguments may be a JSON string or a hash.
     if (ref($h->{function}) eq 'HASH') {
         my $f = $h->{function};
-        $c{tool} = lc($f->{name}) if !length $c{tool} && defined $f->{name};
+        # (defined first: `length undef` warns on a perl before 5.12)
+        $c{tool} = lc($f->{name})
+            if (!defined $c{tool} || !length $c{tool}) && defined $f->{name};
         if (!ref($c{args}) || !keys %{$c{args}}) {
             if (ref($f->{arguments}) eq 'HASH') {
                 $c{args} = $f->{arguments};
