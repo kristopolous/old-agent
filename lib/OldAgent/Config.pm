@@ -21,11 +21,13 @@ my %DEFAULT = (
     tools        => '1',
     approve      => 'ask',       # ask | auto | off
     max_turns    => '12',
+    no_tool_max  => '3',          # tool-less rounds before we stop nudging
     max_output   => '4000',
     root         => '',
     history_chars => '48000',
     system_extra => '',
     exec_cmd     => '',
+    proxy        => '',          # oa-proxy addr (host:port); routes https via modern box
     verbose      => '0',
 );
 

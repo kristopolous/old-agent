@@ -111,11 +111,12 @@ oa doctor          environment report (--ping to reach out to the model)
 oa models          what the endpoint has
 oa tools           what the model thinks it can do
 oa config          settings
+oa-proxy           the companion bridge for legacy boxes (see below)
 ```
 
 In the REPL: `/help`, `/model`, `/provider <name|url>`, `/base-url`, `/tools`,
 `/yes`, `/undo`, `/history`, `/save`, `/load`, `/cd`, `/sh cmd`, `/paste`,
-`/fmt on|off`, `/editor`, `/version`, `/doctor`.
+`/fmt on|off`, `/editor`, `/version`, `/doctor`, `/proxy <host:port|off>`.
 
 `/provider` takes either a provider name (`openai`, `ollama`, `anthropic`,
 `exec`, `echo`) or a base URL — `https://9ol.es/11434` — in which case the
@@ -150,13 +151,15 @@ CommonMark, so `**bold**`, `*slant*`, `_underscore_`, `` `code` ``,
 
 ```
 oa                     entry point
+oa-proxy               the companion bridge (modern perl, no old-Perl rules)
 lib/OldAgent.pm        version, config discovery
 lib/OldAgent/CLI.pm    flags and the REPL
 lib/OldAgent/Agent.pm  the loop, the system prompt, approvals
-lib/OldAgent/Tools.pm  read/write/edit/list/find/bash
+lib/OldAgent/Tools.pm  read/write/edit/list/find/fetch/bash
 lib/OldAgent/Protocol.pm  tool-call parsing, result blocks
 lib/OldAgent/Provider.pm  openai / ollama / anthropic / exec / echo
-lib/OldAgent/HTTP.pm   curl, wget, HTTP::Tiny, LWP, raw socket
+lib/OldAgent/HTTP.pm   curl, wget, HTTP::Tiny, LWP, raw socket (+ proxy relay)
+lib/OldAgent/Proxy.pm  client for oa-proxy (used only when /proxy is set)
 lib/OldAgent/JSON.pm   JSON, because JSON.pm is not in old perl
 lib/OldAgent/Config.pm config layers
 lib/OldAgent/Textfmt.pm  markdown-lite: a token stream for both ANSI and Tk
@@ -164,10 +167,60 @@ lib/OldAgent/Term.pm   a small line editor: history, arrows, wrapping
 lib/OldAgent/Desktop.pm  the optional Tk window
 lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
-t/                     257 tests, no network needed
+t/                     269 tests, no network needed
+```
+
+## oa-proxy: a bridge for machines that stopped in 2000
+
+A box from 2000 has no TLS and no `curl` that speaks HTTPS. `oa-proxy` is a
+small service you run on a *modern* machine (macOS/Linux, modern perl). The
+legacy box points at it with `/proxy host:port` and everything that needs the
+internet goes over plain HTTP to the proxy, which does the modern bit for it:
+
+```
+legacy box (perl 5.006, no TLS)  --plain http-->  oa-proxy  --https-->  the web
+```
+
+Endpoints, all `POST` with a JSON body:
+
+| path      | does                                                        |
+|-----------|-------------------------------------------------------------|
+| `/status` | what the proxy can do (fetch, lightpanda, mcp servers)      |
+| `/fetch`  | get a url as markdown (via lightpanda) or raw text          |
+| `/req`    | relay any request (method/headers/body) over HTTPS, raw back|
+| `/mcp`    | list or call a tool on a stdio MCP server (`mcp.json`)      |
+| `/shot`   | take a base64 image and save it to a file                   |
+
+On the legacy box, `oa-proxy` is invisible: `HTTP` relays any `https://` URL
+through it when `proxy` is set, the `fetch` tool uses it for `fetch` markdown,
+and `/proxy host:port` (re)configures and probes it. Nothing loads until you
+set a proxy, so the dependency-free critical path is untouched. MCP servers
+are declared in a `mcp.json` (`{"mcpServers":{name:{command,args,description}}}`)
+and reachable as `fetch`-style calls the model can make.
+
+Run it:
+
+```
+oa-proxy --port 8470 --mcp ~/.oldagent/mcp.json \
+         --lightpanda ~/.local/bin/lightpanda
 ```
 
 ## changelog
+
+0.1.7
+- `oa-proxy`: a companion bridge service (modern perl) for legacy boxes with no
+  TLS/curl-for-HTTPS. Endpoints: `/status`, `/fetch` (markdown via lightpanda,
+  or raw), `/req` (relay any request over HTTPS), `/mcp` (list/call tools on
+  stdio MCP servers from a `mcp.json`), `/shot` (base64 image relay).
+- `OldAgent::Proxy`: a 5.006-safe client for the bridge, loaded only when a
+  proxy is configured. `HTTP` now relays any `https://` URL through it, so a
+  2000s box can call a modern HTTPS provider.
+- new `fetch` tool (`fetch url [markdown=1] [max_bytes=N]`): fetch a url, via
+  the proxy for `https`, locally for `http`. Aliased `get`/`download`/`url`.
+- `/proxy host:port` REPL command: set/clear/probe the bridge; persisted like
+  the other settings. `/proxy off` to disconnect.
+- provider tool-call robustness carried over; desktop transcript cleanup,
+  streaming, and settings-reach-the-provider from the desktop.
 
 0.1.6
 - HP-UX 5.8.8 fixes: a stray `%` before a `%{...}` hash deref is a parse

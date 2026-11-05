@@ -17,7 +17,20 @@ use OldAgent::Agent ();
 use OldAgent::Textfmt ();
 use OldAgent::Util ();
 use OldAgent::JSON ();
+use OldAgent::Protocol ();
+eval { require Errno; 1 } or require Errno;
 eval { require OldAgent::CLI; 1 } or require OldAgent::CLI;
+
+# utf8 bytes from the wire are inserted into Tk as decoded characters,
+# not as latin-1 bytes (the classic "Whatâs up" mojibake).
+sub _decode {
+    my ($s) = @_;
+    return '' unless defined $s;
+    return $s if utf8::is_utf8($s);
+    my $u = $s;
+    my $ok = eval { no warnings 'utf8'; utf8::decode($u); 1 };
+    return $ok ? $u : $s;
+}
 
 # ------------------------------------------------------------------ output
 
@@ -228,6 +241,7 @@ sub _build {
         $txt->tag('configure', $name, %opt);
     }
     $txt->tag('configure', 'user',     -font => 'Helvetica 11 bold', -foreground => '#0a58ca');
+    $txt->tag('configure', 'tool',     -font => 'Helvetica 10', -foreground => '#555555');
     $txt->tag('configure', 'userhead', -font => 'Helvetica 10 bold', -foreground => '#8a8a8a');
     $txt->tag('configure', 'sys',      -foreground => '#666666');
     $txt->tag('configure', 'note',     -foreground => '#555555', -font => 'Helvetica 10 italic');
@@ -532,12 +546,13 @@ sub _send {
     };
     my $child = $libdir . '/OldAgent/desktop-child.pl';
 
+    # send the whole current config, not a hand-picked subset: the child
+    # rebuilds the agent from this, so a key left out here (api_key,
+    # max_tokens, thinking, timeout, ...) silently falls back to its default
+    # and the request goes out wrong - e.g. unauthenticated to a proxy.
     my $msg = OldAgent::JSON::encode({
         text       => $text,
-        cfg        => { map { $_ => $self->{agent}{cfg}->get($_) }
-                        qw(provider model base_url key api openai_base
-                           ollama_base ollama_model anthropic_base
-                           anthropic_key exec_cmd) },
+        cfg        => $self->{agent}{cfg}->all(),
         max_output => $self->{agent}{cfg}->get('max_output') || 3000,
         history    => [ map { { role => $_->{role}, content => $_->{content} } }
                         @{ $self->{agent}{history} } ],
@@ -561,11 +576,17 @@ sub _send {
         exit 9;
     }
     close $wr;
+    # non-blocking read end: sysread must never hold up the Tk event loop
+    if (eval { require Fcntl; 1 }) {
+        my $fl = eval { Fcntl::fcntl($rd, Fcntl::F_GETFL(), 0) };
+        eval { Fcntl::fcntl($rd, Fcntl::F_SETFL(), $fl | Fcntl::O_NONBLOCK()) } if defined $fl;
+    }
     $self->{busy}    = 1;
     $self->{btn_send}->configure(-state => 'disabled', -text => 'Thinking');
     $self->{acc}     = '';
     $self->{ask_rd}  = $rd;
     $self->{ask_kid} = $kid;
+    $self->{live}    = 0;      # 1 while a streamed round is on screen
     $self->_status('busy');
     $self->{root}->after(50, sub { $self->_ask_poll() });
 }
@@ -574,35 +595,106 @@ sub _ask_poll {
     my ($self) = @_;
     my $rd = $self->{ask_rd};
     return unless defined $rd;
-    my $n = sysread($rd, my $chunk, 4096);
-    if (!defined $n) {                        # no data yet: keep polling
-        $self->{root}->after(50, sub { $self->_ask_poll() });
+    my $n = sysread($rd, my $chunk, 65536);
+    if (!defined $n) {
+        if ($!{EAGAIN} || $!{EWOULDBLOCK} || $!{EINTR}) {  # no data yet
+            $self->{root}->after(50, sub { $self->_ask_poll() });
+            return;
+        }
+        close $rd;
+        $self->{ask_rd} = undef;
+        $self->_ask_final({ ok => 0, err => 'agent connection lost',
+            reply => '', history => [ map { { role => $_->{role}, content => $_->{content} } } @{ $self->{agent}{history} } ] });
         return;
     }
     if ($n == 0) {                            # pipe closed
         close $rd;
-        if (defined $self->{acc} && length $self->{acc}) {
-            my ($msg, $perr) = eval { OldAgent::JSON::decode($self->{acc}) };
-            if ($msg && ref($msg) eq 'HASH') { $self->_ask_done($msg); return }
+        $self->{ask_rd} = undef;
+        if (length $self->{acc}) {
+            $self->_ask_event($self->{acc});
+            $self->{acc} = '';
         }
-        $self->_ask_done({ ok => 0, err => 'agent died before answering',
-            lines => '', reply => '', history => [ map { { role => $_->{role}, content => $_->{content} } } @{ $self->{agent}{history} } ] });
+        $self->_ask_final({ ok => 0, err => 'agent died before finishing',
+            reply => '', history => [ map { { role => $_->{role}, content => $_->{content} } } @{ $self->{agent}{history} } ] })
+            if !$self->{ask_final_seen};
         return;
     }
     $self->{acc} .= $chunk;
-    return unless $self->{acc} =~ /\n/;
-    my $line = (split(/\n/, $self->{acc}, 2))[0];
-    close $rd;
-    my ($msg, $perr) = eval { OldAgent::JSON::decode($line) };
-    if (!$msg || ref($msg) ne 'HASH') {
-        $self->_ask_done({ ok => 0, err => "bad reply from agent child" . (defined $perr ? ": $perr" : ""), lines => $line, reply => '', history => [] });
-        return;
+    while ($self->{acc} =~ s/^(.*?\n)//s) {
+        $self->_ask_event($1);
     }
-    $self->_ask_done($msg);
+    $self->{root}->after(50, sub { $self->_ask_poll() })
+        if defined $self->{ask_rd} && !$self->{ask_final_seen};
+    return;
 }
 
-sub _ask_done {
+# one JSON line from the agent child: note / delta / round / final
+sub _ask_event {
+    my ($self, $line) = @_;
+    $line =~ s/\r?\n\z//;
+    return unless length $line;
+    my ($ev, $err) = eval { OldAgent::JSON::decode($line) };
+    if (!$ev || ref($ev) ne 'HASH') {
+        # child printed something that is not protocol: show it, keep going
+        $self->{txt}->insert('end', $line . "\n", 'err');
+        return;
+    }
+    my $type = $ev->{type} || 'final';        # no type: one-shot legacy line
+    if ($type eq 'note') {
+        my $t = _decode(defined $ev->{text} ? $ev->{text} : '');
+        return unless length $t;
+        if ($self->{live}) { $self->_close_live() }    # keep order: round first
+        $self->{txt}->insert('end', $t . "\n", 'sys');
+        $self->{txt}->see('end');
+    }
+    elsif ($type eq 'delta') {
+        my $t = _decode(defined $ev->{text} ? $ev->{text} : '');
+        return unless length $t;
+        my $txt = $self->{txt};
+        if (!$self->{live}) {
+            $self->{live} = 1;
+            $self->{live_at} = $txt->index('end-1c');
+            $txt->insert('end', "\nagent> ", 'sys');
+        }
+        $txt->insert('end', $t, 'plain');
+        $txt->see('end');
+    }
+    elsif ($type eq 'round') {
+        # the streamed bubble (if any) is raw tokens; replace it with the
+        # finished reply rendered as markdown + quiet tool lines
+        $self->_close_live() if $self->{live};
+        my $t = _decode(defined $ev->{text} ? $ev->{text} : '');
+        if (length OldAgent::Util::strip($t)) {
+            $self->_append_msg('assistant', $t);
+        }
+    }
+    elsif ($type eq 'final') {
+        $self->_ask_final($ev);
+    }
+}
+
+# delete the raw streamed bubble; the formatted version takes its place
+sub _close_live {
+    my ($self) = @_;
+    my $txt = $self->{txt};
+    if (defined $self->{live_at}) {
+        eval { $txt->delete($self->{live_at}, 'end-1c'); 1 } or 0;
+    }
+    $self->{live} = 0;
+    $self->{live_at} = undef;
+}
+
+sub _ask_final {
     my ($self, $msg) = @_;
+    return if $self->{ask_final_seen};
+    $self->{ask_final_seen} = 1;
+    if (defined $self->{ask_rd}) { close $self->{ask_rd}; $self->{ask_rd} = undef }
+    if (defined $self->{ask_kid}) {
+        my $w = 1;
+        while ($w && ($w = waitpid($self->{ask_kid}, 1)) > 0) {}   # reap
+        $self->{ask_kid} = undef;
+    }
+    $self->_close_live() if $self->{live};
     $self->{busy} = 0;
     $self->{btn_send}->configure(-state => 'normal', -text => 'Send');
 
@@ -611,23 +703,16 @@ sub _ask_done {
         $self->{agent}{history} = [ map { { role => $_->{role}, content => $_->{content} } } @{ $msg->{history} } ];
     }
 
-    if (defined $msg->{lines} && length $msg->{lines}) {
-        for my $ln (split(/\n/, $msg->{lines})) {
-            next unless length $ln;
-            $self->{txt}->insert('end', $ln, "\n", 'sys');
+    if (!$msg->{ok}) {
+        # only surface the error if nothing was rendered at all this turn
+        if (!defined $self->{rendered_this_turn} || !$self->{rendered_this_turn}) {
+            $self->{txt}->insert('end', "\nagent> ", 'sys');
+            $self->{txt}->insert('end', "error: " . _decode(defined $msg->{err} ? $msg->{err} : 'unknown') . "\n", 'err');
+            $self->{txt}->see('end');
         }
-        $self->{txt}->see('end');
     }
-
-    if ($msg->{ok}) {
-        $self->_append_msg('assistant', $msg->{reply});
-    } else {
-        $self->{txt}->insert('end', "\nagent> ", 'sys');
-        $self->{txt}->insert('end', "error: " . ($msg->{err} || 'unknown'), "\n", 'err');
-        $self->{txt}->see('end');
-    }
+    $self->{rendered_this_turn} = 0;
     $self->_status();
-    $self->_redraw();
 }
 
 # ---------------------------------------------------------------- render --
@@ -635,23 +720,94 @@ sub _ask_done {
 sub _append_msg {
     my ($self, $role, $text) = @_;
     my $txt = $self->{txt};
-    $txt->insert('end', "\n", 'plain');
+    $text = _decode($text);
     if ($role eq 'user') {
+        # tool results and nudges are protocol traffic, not things the human
+        # typed: give each result a single unobtrusive line instead of the
+        # raw JSON, and skip internal nudges entirely.
+        if ($text =~ /^```result\b/s) {
+            $self->_render_results($text);
+            return;
+        }
+        if ($text =~ /No tool call was emitted, so nothing was executed/) {
+            $txt->insert('end', "\n  (kept the model moving - no action yet)\n", 'note');
+            return;
+        }
+        $txt->insert('end', "\n", 'plain');
         $txt->insert('end', "you> ", 'userhead');
         $txt->insert('end', $text, 'user');
         $txt->insert('end', "\n", 'plain');
     } else {
-        $txt->insert('end', "agent> ", 'sys');
-        $self->_render_md($text);
         $txt->insert('end', "\n", 'plain');
+        $txt->insert('end', "agent> ", 'sys');
+        # the assistant's tool/result fences are protocol, not prose: show
+        # the prose as markdown and one quiet line per tool call
+        my ($prose, $tools, $results) = OldAgent::Protocol::visible($text);
+        if (length OldAgent::Util::strip($prose)) {
+            $self->_render_md($prose);
+        }
+        $self->_render_tools($tools) if length OldAgent::Util::strip($tools);
+        $self->_render_results($results) if length OldAgent::Util::strip($results);
     }
     $txt->see('end');
+}
+
+# one quiet line per tool call:  [tool] read  path=fruits.txt
+sub _render_tools {
+    my ($self, $tools) = @_;
+    my $txt = $self->{txt};
+    for my $t (split(/\n/, $tools)) {
+        next unless length $t;
+        my ($d, $err) = OldAgent::JSON::decode($t);
+        if (!$err && ref($d) eq 'HASH' && defined $d->{tool}) {
+            # collapse to one quiet line: [tool] read  path=fruits.txt
+            my $name = $d->{tool};
+            my $arg  = $d->{args};
+            my $brief = '';
+            if (ref($arg) eq 'HASH') {
+                my @bits;
+                for my $k (sort keys %$arg) {
+                    my $v = $arg->{$k};
+                    next unless defined $v && !ref $v;
+                    $v = OldAgent::Util::one_line(OldAgent::Util::strip("$v"));
+                    $v = OldAgent::Util::clip($v, 40);
+                    push @bits, "$k=$v";
+                }
+                $brief = '  ' . join(' ', @bits) if @bits;
+            }
+            my $line = OldAgent::Util::clip("$name$brief", 110);
+            $txt->insert('end', '  [tool] ' . _decode($line) . "\n", 'tool');
+        } else {
+            # not JSON (e.g. an <function=...> summary line): show as-is
+            my $line = OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($t)), 110);
+            $txt->insert('end', '  [tool] ' . _decode($line) . "\n", 'tool');
+        }
+    }
+}
+
+# one quiet line per tool result:  [read] ok - 12 bytes
+sub _render_results {
+    my ($self, $results) = @_;
+    my $txt = $self->{txt};
+    for my $r (split(/\n/, $results)) {
+        next unless length $r;
+        my ($d, $err) = OldAgent::JSON::decode($r);
+        if (!$err && ref($d) eq 'HASH' && defined $d->{tool}) {
+            my $out = defined $d->{output} ? $d->{output} : '';
+            my $note = $d->{ok}
+                ? 'ok' . (length OldAgent::Util::strip($out) ? ' - ' . OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($out)), 70) : '')
+                : 'failed' . (length $out ? ' - ' . OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($out)), 70) : '');
+            $txt->insert('end', '  [' . $d->{tool} . '] ' . _decode($note) . "\n", 'tool');
+            next;
+        }
+        $txt->insert('end', '  [tool] ' . _decode(OldAgent::Util::clip(OldAgent::Util::one_line(OldAgent::Util::strip($r)), 110)) . "\n", 'tool');
+    }
 }
 
 sub _render_md {
     my ($self, $text) = @_;
     my $txt = $self->{txt};
-    for my $line (OldAgent::Textfmt::tokens($text)) {
+    for my $line (OldAgent::Textfmt::tokens(_decode($text))) {
         for my $tok (@$line) {
             my ($tags, $str) = @$tok;
             next unless defined $str && length $str;

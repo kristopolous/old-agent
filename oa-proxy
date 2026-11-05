@@ -1,0 +1,480 @@
+#!/usr/bin/env perl
+# oa-proxy - bridge service that oldagent (on a legacy box without TLS or curl)
+# can call over plain HTTP to reach the modern internet.
+#
+#   oldagent  --plain http-->  oa-proxy (modern box)  --https/tls-->  internet
+#
+# Endpoints (all POST, JSON body, JSON response):
+#   /status   {}                                -> service capabilities
+#   /fetch    {"url":"...","format":"markdown|text|raw","max_bytes":N}
+#             -> {"ok":1,"text":"..."}           (markdown via lightpanda)
+#   /mcp      {"server":"name","list":1}        -> {"ok":1,"tools":[...]}
+#   /mcp      {"server":"name","tool":"t","args":{...},"timeout":s}
+#             -> {"ok":1,"text":"result text"}
+#   /shot     {"image_b64":"...","name":"x"}    -> {"ok":1,"path":"/tmp/..."}
+#
+# Modern Perl only; no old-Perl compatibility constraints.
+use strict;
+use warnings;
+use IO::Socket::INET;
+use Getopt::Long;
+use File::Temp;
+
+# JSON: JSON::PP is core on modern Perl.
+my $JSON;
+BEGIN {
+    if (eval { require JSON::PP; 1 }) {
+        $JSON = JSON::PP->new->utf8(1)->canonical(1);
+    } else {
+        die "oa-proxy needs JSON::PP (core module)\n";
+    }
+}
+
+my %opt = (
+    port       => 8470,
+    host       => '127.0.0.1',
+    mcp_cfg    => '',
+    lightpanda => ($^O eq 'linux' ? 'lightpanda' : 'lightpanda'),
+    shot_dir   => "/tmp/oa-shots-$$",
+);
+GetOptions(
+    'port=i'       => \$opt{port},
+    'host=s'       => \$opt{host},
+    'mcp=s'        => \$opt{mcp_cfg},
+    'lightpanda=s' => \$opt{lightpanda},
+    'shot-dir=s'   => \$opt{shot_dir},
+    'verbose'      => \$opt{verbose},
+) or die "usage: oa-proxy --port N [--host ADDR] [--mcp mcp.json] [--lightpanda PATH] [--shot-dir DIR]\n";
+
+sub _log {
+    my ($msg) = @_;
+    return unless $opt{verbose};
+    print STDERR "[oa-proxy] $msg\n";
+}
+
+sub _now {
+    return time;
+}
+
+sub _clip {
+    my ($s, $n) = @_;
+    $n //= 160;
+    $s = '' unless defined $s;
+    $s =~ s/\s+/ /g;
+    $s = substr($s, 0, $n) if length $s > $n;
+    return $s;
+}
+
+sub _read_file {
+    my ($path) = @_ ;
+    return '' unless defined $path && -f $path;
+    my $s;
+    if (open(my $fh, '<', $path)) {
+        local $/; $s = <$fh>; close($fh);
+    }
+    return defined $s ? $s : '';
+}
+
+sub _json_decode {
+    my ($s) = @_;
+    return ({}, undef) unless defined $s && length $s;
+    my $v = eval { $JSON->decode($s) };
+    return (undef, "json: $@") if $@;
+    return ($v, undef);
+}
+
+sub _json_encode {
+    my ($v) = @_;
+    my $s = eval { $JSON->encode($v) };
+    return '' if $@;
+    return $s;
+}
+
+sub _http_response {
+    my ($fh, $json) = @_;
+    my $body = _json_encode($json);
+    print $fh "HTTP/1.1 200 OK\r\n";
+    print $fh "Content-Type: application/json\r\n";
+    print $fh "Content-Length: ", length($body), "\r\n";
+    print $fh "Connection: close\r\n\r\n";
+    print $fh $body;
+}
+
+# --- fetch via HTTP::Tiny (core), or lightpanda for markdown ---
+
+sub _fetch_raw {
+    my ($url, $max_bytes) = @_;
+    return (undef, 'no http module') unless eval { require HTTP::Tiny; 1 };
+    my $http = HTTP::Tiny->new(timeout => 60);
+    my $res = $http->get($url);
+    return (undef, $res->{reason}) unless $res->{success};
+    my $body = $res->{content} // '';
+    $body = substr($body, 0, $max_bytes // 100000) if defined $max_bytes;
+    return ($body, undef);
+}
+
+sub _fetch_markdown {
+    my ($url, $max_bytes) = @_;
+    my $lp = $opt{lightpanda};
+    return (undef, "no lightpanda at $lp") unless -x $lp;
+    # lightpanda fetch <url> --dump markdown  -> markdown on stdout
+    my @cmd = ($lp, 'fetch', $url,
+               '--dump', 'markdown',
+               '--strip-mode', 'clutter',
+               '--wait-ms', '15000',
+               '--terminate-ms', '20000');
+    push @cmd, ('--dump-max-bytes', $max_bytes) if defined $max_bytes;
+    pipe(my $out_r, my $out_w) or return (undef, "pipe: $!");
+    my $pid = fork();
+    return (undef, 'fork failed') unless defined $pid;
+    if ($pid == 0) {
+        close($out_r);
+        open(STDOUT, '>&', $out_w) or exit 3;
+        open(STDERR, '>&', $out_w) or exit 4;
+        exec(@cmd) or exit 127;
+    }
+    close($out_w);
+    my $out;
+    {
+        local $/;
+        $out = <$out_r>;
+    }
+    close($out_r);
+    # wait with a timeout
+    my $t = 0;
+    while (!kill(0, $pid) && $t < 30) {
+        select(undef, undef, undef, 1);
+        $t++;
+    }
+    if (kill(0, $pid)) { kill 9, $pid; }
+    waitpid($pid, 0);
+    return (undef, 'lightpanda failed') unless defined $out && length $out;
+    $out = substr($out, 0, $max_bytes // 100000) if defined $max_bytes;
+    return ($out, undef);
+}
+
+sub _fetch {
+    my ($body) = @_;
+    my ($req, $err) = _json_decode($body);
+    return { ok => 0, error => $err // 'bad json' } if $err;
+    my $url = $req->{url} // '';
+    return { ok => 0, error => 'no url' } unless $url =~ m{^https?://}i;
+    my $fmt  = $req->{format} // 'text';
+    my $max  = $req->{max_bytes};
+    if ($fmt eq 'markdown' && -x $opt{lightpanda}) {
+        my ($text, $e) = _fetch_markdown($url, $max);
+        return { ok => 0, error => $e } if $e;
+        return { ok => 1, text => $text, format => 'markdown', bytes => length($text) };
+    }
+    my ($text, $e) = _fetch_raw($url, $max);
+    return { ok => 0, error => $e } if $e;
+    return { ok => 1, text => $text, format => $fmt, bytes => length($text) };
+}
+
+# --- MCP: spawn server, speak JSON-RPC, get response ---
+# Node buffers stdout when it is a pipe; route it to a temp file instead and
+# poll the file. Also close all inherited fds in the child (a proxy handler
+# has its client socket open; leaking that into an event-looped server like
+# node can stall it).
+
+sub _load_mcp {
+    return {} unless $opt{mcp_cfg} && -f $opt{mcp_cfg};
+    my ($cfg, $e) = _json_decode(_read_file($opt{mcp_cfg}));
+    if ($e) { _log("mcp config error: $e"); return {}; }
+    my $servers = $cfg->{mcpServers} // $cfg->{servers} // {};
+    for my $name (keys %$servers) {
+        my $s = $servers->{$name};
+        my $cmd = $s->{command};
+        next unless defined $cmd;
+        my @argv = ($cmd, @{ $s->{args} || [] });
+        $servers->{$name} = { argv => \@argv, desc => $s->{description} // '' };
+    }
+    return $servers;
+}
+
+my %MCP_SERVERS = %{ _load_mcp() };
+
+sub _mcp {
+    my ($body) = @_;
+    my ($req, $err) = _json_decode($body);
+    return (undef, $err // 'bad json') if $err;
+    my $name = $req->{server} // '';
+    return (undef, "no such mcp server: $name") unless $MCP_SERVERS{$name};
+    my $cfg     = $MCP_SERVERS{$name};
+    my $tool    = $req->{tool};
+    my $args    = $req->{args} || {};
+    my $timeout = $req->{timeout} // 30;
+    my $want_list = $req->{list};
+    my @argv  = @{ $cfg->{argv} };
+
+    # temp files for the server's stdout and stderr
+    my $outf = File::Temp->new(SUFFIX => '.mcpout')->filename;
+    my $errf = File::Temp->new(SUFFIX => '.mcperr')->filename;
+    pipe(my $in_r, my $in_w) or return (undef, "pipe: $!");
+
+    my $pid = fork();
+    return (undef, 'fork failed') unless defined $pid;
+    if ($pid == 0) {
+        close($in_w);
+        # close every inherited fd except the stdin pipe and 0/1/2
+        my $keep = fileno($in_r);
+        if (opendir(my $fdh, '/proc/self/fd')) {
+            for my $f (readdir($fdh)) {
+                next unless $f =~ /^\d+$/;
+                my $n = $f + 0;
+                next if $n <= 2;
+                next if $n == $keep;
+                close($n);
+            }
+            closedir($fdh);
+        }
+        open(STDIN,  '<&', $in_r) or exit 3;
+        open(STDOUT, '>', $outf) or exit 4;
+        open(STDERR, '>', $errf) or exit 5;
+        exec(@argv) or exit 127;
+    }
+    close($in_r);   # parent: write requests to $in_w, read responses from $outf
+
+    my $send = sub {
+        my ($obj) = @_ ;
+        # JSON-RPC frames are one line each: strip any newlines INSIDE the
+        # encoded object, then append exactly one delimiter newline.
+        my $line = _json_encode($obj);
+        $line =~ s/\r?\n//g;
+        $line .= "\n";
+        my $off = 0;
+        while ($off < length $line) {
+            my $n = syswrite($in_w, substr($line, $off));
+            last unless defined $n && $n > 0;
+            $off += $n;
+        }
+    };
+
+    my $seen    = 0;
+    my $linebuf = '';
+    my $read_resp = sub {
+        my ($want_id, $tmo) = @_;
+        my $deadline = _now() + $tmo;
+        while (1) {
+            my $size = -s $outf;
+            if (defined $size && $size > $seen) {
+                if (open(my $fh, '+<', $outf)) {
+                    binmode($fh);
+                    seek($fh, $seen, 0);
+                    my $chunk;
+                    my $g = read($fh, $chunk, $size - $seen);
+                    $seen += $g if defined $g && $g > 0;
+                    $linebuf .= $chunk if defined $chunk && length $chunk;
+                    close($fh);
+                }
+            }
+            if ($linebuf =~ /\n/) {
+                my ($l, $rest) = split(/\n/, $linebuf, 2);
+                $linebuf = (defined $rest && $rest ne '') ? $rest : '';
+                $l =~ s/\s+$//;
+                next unless length $l;
+                my ($msg, $e) = _json_decode($l);
+                next if $e;
+                next unless ref($msg) eq 'HASH' && defined $msg->{id};
+                next unless "$msg->{id}" eq "$want_id";
+                return ($msg, undef);
+            }
+            if (_now() > $deadline) {
+                return (undef, 'mcp server timed out');
+            }
+            if (!kill(0, $pid) && length $linebuf == 0 && (defined($size) ? $size : 0) <= $seen) {
+                return (undef, 'mcp server exited');
+            }
+            select(undef, undef, undef, 0.05);
+        }
+    };
+
+    $send->({ jsonrpc => '2.0', id => 1, method => 'initialize',
+        params => {
+            protocolVersion => '2024-11-05',
+            capabilities    => {},
+            clientInfo      => { name => 'oldagent-proxy', version => '0.1' },
+        } });
+    my ($init, $err2) = $read_resp->(1, 20);
+    if ($err2) {
+        my $detail = _clip(_read_file($errf));
+        kill 9, $pid; waitpid($pid, 0); unlink $outf, $errf;
+        return (undef, "initialize: $err2" . (length $detail ? " ($detail)" : ''));
+    }
+    $send->({ jsonrpc => '2.0', method => 'notifications/initialized' });
+
+    my $result;
+    if ($want_list) {
+        $send->({ jsonrpc => '2.0', id => 2, method => 'tools/list', params => {} });
+        my ($resp, $e2) = $read_resp->(2, $timeout);
+        return (undef, "tools/list: $e2") if $e2;
+        $result = $resp->{result} || {};
+    } else {
+        return (undef, 'no tool name') unless defined $tool;
+        $send->({ jsonrpc => '2.0', id => 2, method => 'tools/call',
+            params => { name => $tool, arguments => $args } });
+        my ($resp, $e2) = $read_resp->(2, $timeout);
+        return (undef, "tools/call: $e2") if $e2;
+        return (undef, $resp->{error}{message} // 'mcp error') if $resp->{error};
+        $result = $resp->{result} || {};
+    }
+
+    my @texts;
+    if (ref($result) eq 'HASH' && ref($result->{content}) eq 'ARRAY') {
+        for my $c (@{ $result->{content} }) {
+            push @texts, $c->{text} if ref($c) eq 'HASH' && defined $c->{text};
+        }
+    } elsif (ref($result) eq 'HASH' && defined $result->{text}) {
+        push @texts, $result->{text};
+    } else {
+        push @texts, _json_encode($result);
+    }
+
+    close($in_w) if defined fileno($in_w);
+    kill 9, $pid;
+    waitpid($pid, 0);
+    unlink $outf, $errf;
+    return (join("\n", @texts), undef);
+}
+
+# --- screenshot relay ---
+# generic HTTPS relay: forward an arbitrary request, return raw response
+sub _req {
+    my ($body) = @_ ;
+    my ($r, $err) = _json_decode($body);
+    return { ok => 0, error => $err // 'bad json' } if $err;
+    my $url = $r->{url} // '';
+    return { ok => 0, error => 'no url' } unless $url =~ m{^https?://}i;
+    return { ok => 0, error => 'no http module' } unless eval { require HTTP::Tiny; 1 };
+    my $http = HTTP::Tiny->new(timeout => ($r->{timeout} || 60));
+    my %arg = ( headers => ($r->{headers} || {}) );
+    $arg{content} = $r->{body} if defined $r->{body};
+    my $res = $http->request( ($r->{method} || 'GET'), $url, \%arg );
+    return {
+        ok      => ($res->{success} ? 1 : 0),
+        status  => $res->{status},
+        reason  => $res->{reason},
+        headers => $res->{headers},
+        body    => $res->{content},
+    };
+}
+
+sub _shot {
+    my ($body) = @_;
+    my ($req, $err) = _json_decode($body);
+    return { ok => 0, error => $err // 'bad json' } if $err;
+    my $b64 = $req->{image_b64} // '';
+    return { ok => 0, error => 'no image_b64' } unless length $b64;
+    my $name = $req->{name} // 'shot';
+    $name =~ s/[^A-Za-z0-9_.-]/_/g;
+    mkdir $opt{shot_dir} unless -d $opt{shot_dir};
+    my $path = "$opt{shot_dir}/$name.png";
+    # decode base64 (MIME::Base64 is core on modern perl)
+    my $out = '';
+    if (eval { require MIME::Base64; 1 }) {
+        $out = MIME::Base64::decode_base64($b64);
+    } else {
+        my %b2i = map { $_ => ord } ('A'..'Z', 'a'..'z', '0'..'9', '+', '/');
+        my $bits = 0;
+        my $n = 0;
+        for my $ch (split(//, $b64)) {
+            next unless exists $b2i{$ch};
+            $bits = ($bits << 6) | $b2i{$ch};
+            $n++;
+            if ($n % 4 == 0) {
+                $out .= chr(($bits >> 16) & 0xff);
+                $out .= chr(($bits >> 8) & 0xff);
+                $out .= chr($bits & 0xff);
+                $bits = 0;
+            }
+        }
+    }
+    if (open(my $fh, '>', $path)) {
+        binmode($fh);
+        print $fh $out;
+        close($fh);
+        return { ok => 1, path => $path, bytes => length($out) };
+    }
+    return { ok => 0, error => "cannot write $path" };
+}
+
+# --- main loop ---
+my $server = IO::Socket::INET->new(
+    LocalAddr => $opt{host},
+    LocalPort => $opt{port},
+    Proto     => 'tcp',
+    Listen    => 16,
+    ReuseAddr => 1,
+) or die "oa-proxy: cannot bind $opt{host}:$opt{port}: $!\n";
+_log("listening on $opt{host}:$opt{port}");
+
+sub _handle {
+    my ($fh) = @_;
+    my $reqline = <$fh>;
+    return unless defined $reqline;
+    $reqline =~ s/\r?\n$//;
+    my ($method, $path, $ver) = split(/\s+/, $reqline, 3);
+    return unless $method && $path;
+    my %headers;
+    while (my $h = <$fh>) {
+        $h =~ s/\r?\n$//;
+        last if $h eq '';
+        my ($k, $v) = split(/:\s*/, $h, 2);
+        $headers{lc $k} = $v if defined $k;
+    }
+    my $body = '';
+    if ($headers{'content-length'}) {
+        my $len = $headers{'content-length'};
+        $len = 0 unless $len =~ /^\d+$/;
+        my $got = 0;
+        while ($got < $len) {
+            my $chunk;
+            my $r = read($fh, $chunk, $len - $got);
+            last unless defined $r && $r > 0;
+            $body .= $chunk;
+            $got += $r;
+        }
+    }
+
+    my $resp;
+    if ($path =~ m{^/status$}) {
+        my @mcp_names = keys %MCP_SERVERS;
+        $resp = {
+            ok   => 1,
+            service => 'oa-proxy',
+            version => '0.1',
+            time => time,
+            fetch => (eval { require HTTP::Tiny; 1 } ? 1 : 0),
+            lightpanda => (-x $opt{lightpanda} ? 1 : 0),
+            mcp => (scalar @mcp_names > 0 ? 1 : 0),
+            mcp_servers => [ sort keys %MCP_SERVERS ],
+            screenshot => 1,
+        };
+    } elsif ($path =~ m{^/fetch$}) {
+        $resp = _fetch($body);
+    } elsif ($path =~ m{^/mcp$}) {
+        my ($text, $e) = _mcp($body);
+        $resp = $e ? { ok => 0, error => $e } : { ok => 1, text => $text };
+    } elsif ($path =~ m{^/req$}) {
+        $resp = _req($body);
+    } elsif ($path =~ m{^/shot$}) {
+        $resp = _shot($body);
+    } else {
+        $resp = { ok => 0, error => "unknown path: $path" };
+    }
+    _http_response($fh, $resp);
+}
+
+while (my $client = $server->accept()) {
+    my $pid = fork();
+    if (!defined $pid) {
+        print $client "HTTP/1.1 503 Busy\r\nContent-Length: 0\r\nConnection: close\r\n\r\n";
+        close($client);
+    } elsif ($pid == 0) {
+        eval { _handle($client) };
+        close($client);
+        exit 0;
+    } else {
+        close($client);
+    }
+}

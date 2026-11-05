@@ -16,6 +16,12 @@ use OldAgent::Provider ();
 
 my @NOTES = ('oldagent.md', 'oldagent.local.md', 'AGENTS.md', 'CLAUDE.md');
 
+# how many rounds in a row the model may reply with no tool call before we
+# give up. a model that keeps talking instead of acting is not going to act
+# on its own; nudge it a few times, then stop. 0 disables the nudge entirely
+# (the old behaviour: stop at the first tool-less reply).
+my $NO_TOOL_MAX = 3;
+
 sub new {
     my ($class, %a) = @_;
     my $cfg = $a{config} or die "agent needs a config\n";
@@ -25,9 +31,12 @@ sub new {
                           root       => $cfg->get('root'),
                           max_output => $cfg->get('max_output'),
                           timeout    => 30,
+                          cfg        => $cfg,
                       ),
         provider  => $a{provider} || OldAgent::Provider->new(config => $cfg),
         formatter => $a{formatter},          # optional: sub(visible_text) -> rendered
+        token     => $a{token},              # optional: sub(piece) while streaming
+        round     => $a{round},              # optional: sub(reply) per assistant turn
         history   => [],
         out       => $a{out} || \*STDOUT,
         approve   => $a{approve},          # code ref or undef
@@ -92,7 +101,7 @@ sub system_prompt {
         $s .= "  - Never invent or predict a result. Ask, stop, and wait.\n";
         $s .= "  - Read before you write. Use edit for small changes, write for new files.\n";
         $s .= "  - Keep output small: read with from/lines, list with glob, find with a pattern.\n";
-        $s .= "  - When the task is finished, emit a done block with a one-paragraph summary.\n";
+        $s .= "  - When the task is finished, END your final reply with a done block: a single fenced tool block containing {\"tool\":\"done\",\"args\":{\"summary\":\"one paragraph\"}}.\n";
         $s .= "  - Plain prose outside tool blocks is shown to the human.\n";
     } else {
         $s .= "You have no tools in this session. Answer in plain text only.\n";
@@ -122,7 +131,22 @@ sub notes {
     return $out;
 }
 
-sub reset { my ($self) = @_; $self->{history} = []; $self->{stats} = { turns => 0, calls => 0, denied => 0 }; }
+sub reset { my ($self) = @_; $self->{history} = []; $self->{no_tool} = 0; $self->{stats} = { turns => 0, calls => 0, denied => 0 }; }
+
+# the reminder a model gets when it replies without doing anything: do the
+# next step, don't narrate it; and when it is truly finished, say so with a
+# done block.
+sub _nudge {
+    return "No tool call was emitted, so nothing was executed - the task is not "
+        . "done yet. Take the next concrete step by emitting a fenced tool "
+        . "block now, for example:\n"
+        . "  \`\`\`tool\n"
+        . "  {\"tool\":\"read\",\"args\":{\"path\":\"fruits.txt\"}}\n"
+        . "  \`\`\`\n"
+        . "Run or do the step; do not describe it in prose. When the task is "
+        . "fully finished, emit {\"tool\":\"done\",\"args\":{\"summary\":\"one "
+        . "paragraph\"}}.";
+}
 
 sub _trim_history {
     my ($self) = @_;
@@ -164,10 +188,20 @@ sub _loop {
     my $last = '';
     for (my $turn = 1; $turn <= $self->{max_turns}; $turn++) {
         $self->_trim_history;
-        my ($reply, $err) = $self->{provider}->chat(
-            system   => $self->system_prompt(),
-            messages => $self->{history},
-        );
+        my ($reply, $err);
+        if (ref($self->{token}) eq 'CODE'
+            && $self->{provider}->can('chat_stream')) {
+            ($reply, $err) = $self->{provider}->chat_stream(
+                system   => $self->system_prompt(),
+                messages => $self->{history},
+                token    => $self->{token},
+            );
+        } else {
+            ($reply, $err) = $self->{provider}->chat(
+                system   => $self->system_prompt(),
+                messages => $self->{history},
+            );
+        }
         if ($err) {
             $self->emit('[oldagent] ' . $err);
             pop @{ $self->{history} } if $turn == 1;
@@ -177,16 +211,38 @@ sub _loop {
         push @{ $self->{history} }, { role => 'assistant', content => $reply };
         $self->{stats}{turns}++;
         $last = $reply;
+        $self->{round}->($reply) if ref($self->{round}) eq 'CODE';
 
         my $shown = _strip_blocks($reply);
-        if (length OldAgent::Util::strip($shown)) {
+        # when a token callback is streaming the reply live, do not print it
+        # a second time when the round finishes; the listener has it already.
+        if (ref($self->{token}) ne 'CODE'
+            && length OldAgent::Util::strip($shown)) {
             $shown = $self->{formatter}->($shown) if ref($self->{formatter}) eq 'CODE';
             $self->emit($shown);
         }
 
         last unless $self->{tools_on};
         my $calls = OldAgent::Protocol::parse($reply);
-        last unless @$calls;
+        unless (@$calls) {
+            # the model replied without a tool call and without a done block,
+            # so nothing ran. that is a premature stop, not a finish - nudge
+            # it to emit its next action and keep the loop going, but give up
+            # after a few empty rounds so a stubborn model cannot run the
+            # budget down in a circle.
+            if ($self->{cfg}->get('no_tool_max', $NO_TOOL_MAX) >= 0) {
+                $self->{no_tool} = ($self->{no_tool} || 0) + 1;
+                if ($self->{no_tool} > $self->{cfg}->get('no_tool_max', $NO_TOOL_MAX)) {
+                    $self->emit('[oldagent] the model stopped emitting tool calls; stopping');
+                    last;
+                }
+                push @{ $self->{history} },
+                    { role => 'user', content => _nudge(), nudge => 1 };
+                next;
+            }
+            last;
+        }
+        $self->{no_tool} = 0;
 
         my @results;
         my $finished;

@@ -368,6 +368,41 @@ sub repl_command {
         else    { print "model = " . $cfg->get('model') . "\n" }
         return;
     }
+    if ($c eq 'proxy') {
+        if (@r) {
+            my $arg = $r[0];
+            if ($arg eq 'off' || $arg eq 'clear') {
+                $cfg->set(proxy => '');
+                print "proxy cleared\n";
+                _remember($cfg, 'proxy');
+            } else {
+                my $u = $arg;
+                $u =~ s{^https?://}{};
+                $u =~ s{/.*$}{};
+                $cfg->set(proxy => $u);
+                eval { require OldAgent::Proxy; 1 };
+                if (!$@) {
+                    my ($st, $err) = OldAgent::Proxy::status($cfg, $u, 8);
+                    if ($err) {
+                        print "proxy = $u  (unreachable: $err)\n";
+                    } else {
+                        my $lp = $st->{lightpanda} ? 'yes' : 'no';
+                        my $fc = $st->{fetch} ? 'yes' : 'no';
+                        my @ms = @{ $st->{mcp_servers} || [] };
+                        print "proxy = $u  (fetch $fc, lightpanda $lp, mcp "
+                            . (scalar @ms ? join(",", @ms) : "none") . ")\n";
+                    }
+                } else {
+                    print "proxy = $u\n";
+                }
+                _remember($cfg, 'proxy');
+            }
+        } else {
+            my $cur = $cfg->get('proxy');
+            print "proxy = ", ($cur ? $cur : "(none)"), "\n";
+        }
+        return;
+    }
     if ($c eq 'provider' || $c eq 'base-url' || $c eq 'url') {
         if ($c ne 'provider') {
             if (@r) {

@@ -50,8 +50,145 @@ sub chat {
             ? " -- that looks like a url; use /base-url instead" : '';
         return (undef, "unknown provider '$kind' (openai, ollama, anthropic, exec, echo)$hint");
     }
+    # optional: a token callback is only meaningful while streaming; a one-shot
+    # back end has no tokens to show, so it simply goes unused.
     $self->{last_meta} = { provider => $kind, error => $err };
     return ($text, $err);
+}
+
+# chat_stream(system, messages, token => CODE) -> (full_text, error)
+# incremental: token->(piece) as text arrives; the same contract as chat().
+# only the openai-compat and ollama dialects stream (both are line based and
+# every transport can read a pipe line by line); everything else falls back
+# to the one-shot chat, which still works exactly as before.
+sub chat_stream {
+    my ($self, %a) = @_;
+    my $token = ref($a{token}) eq 'CODE' ? $a{token} : undef;
+    my $kind = $self->kind;
+    my ($text, $err);
+    if (($kind eq 'openai' || $kind eq 'openai-compat') && $token) {
+        ($text, $err) = $self->_openai_stream(%a);
+        if ($err) { ($text, $err) = $self->_openai(%a) }   # fall back to one-shot
+    }
+    elsif (($kind eq 'ollama' && !$self->{cfg}->get('openai_compat')) && $token) {
+        ($text, $err) = $self->_ollama_stream(%a);
+        if ($err) { ($text, $err) = $self->_ollama(%a) }
+    }
+    else {
+        ($text, $err) = $self->chat(%a);
+    }
+    $self->{last_meta} = { provider => $kind, error => $err };
+    return ($text, $err);
+}
+
+# ------------------------------------------------------------ streaming ---
+
+sub _openai_stream {
+    my ($self, %a) = @_;
+    my $base = $self->{cfg}->get('base_url');
+    my $url  = "$base/chat/completions";
+    my %payload = (
+        model    => $self->{cfg}->get('model'),
+        messages => [ { role => 'system',
+                        content => OldAgent::JSON::str($a{system}) },
+                      @{ $self->_clean_messages($a{messages}) } ],
+        stream   => OldAgent::JSON::num(1),
+    );
+    my $t = $self->{cfg}->get('temperature');
+    $payload{temperature} = OldAgent::JSON::num($t) if defined $t && length $t;
+    my $mt = $self->{cfg}->get('max_tokens');
+    $payload{max_tokens} = OldAgent::JSON::num($mt) if defined $mt && length $mt;
+
+    my $full = '';
+    my $serr;
+    my $r = OldAgent::HTTP::stream_request(
+        url     => $url,
+        method  => 'POST',
+        headers => $self->_headers(),
+        body    => OldAgent::JSON::encode(\%payload),
+        timeout => $self->{timeout},
+        on_line => sub {
+            my ($line) = @_;
+            return unless $line =~ /\S/;
+            return unless $line =~ /^data:\s*(\[?\S.*)$/s;
+            return if $1 =~ /^\s*\[/;            # [DONE] and friends
+            my ($d, $derr) = OldAgent::JSON::decode($1);
+            return if defined $derr;
+            if (ref($d) eq 'HASH' && ref($d->{error}) eq 'HASH') {
+                $serr = 'api error: ' . ($d->{error}{message} || 'unknown');
+                return;
+            }
+            my $ch = ref($d->{choices}) eq 'ARRAY' ? $d->{choices} : [];
+            return unless @$ch;
+            my $delta = (ref($ch->[0]{delta}) eq 'HASH') ? $ch->[0]{delta}{content}
+                      : (ref($ch->[0]{message}) eq 'HASH' ? $ch->[0]{message}{content}
+                                                         : undef);
+            if (defined $delta && length $delta) {
+                $full .= $delta;
+                $a{token}->($delta);
+            }
+        },
+    );
+    if ($serr) { return (undef, $serr) }
+    if ($r->{error} && !length $full) {
+        return (undef, "request to $url failed: " . $r->{error} . ' (via ' . $r->{backend} . ')');
+    }
+    return ($full, undef);
+}
+
+sub _ollama_stream {
+    my ($self, %a) = @_;
+    my $base = $self->{cfg}->get('base_url');
+    $base =~ s{/v1$}{};
+    my $url = "$base/api/chat";
+    my %options;
+    my $t = $self->{cfg}->get('temperature');
+    $options{temperature} = OldAgent::JSON::num($t) if defined $t && length $t;
+    my $mt = $self->{cfg}->get('max_tokens');
+    $options{num_predict} = OldAgent::JSON::num($mt) if defined $mt && length $mt;
+    my $think = $self->{cfg}->get('thinking');
+    $options{think} = OldAgent::JSON::num(defined $think && $think eq '1' ? 1 : 0);
+    my %payload = (
+        model    => $self->{cfg}->get('model'),
+        system   => $a{system},
+        messages => [ map { { role => $_->{role}, content => $_->{content} } }
+                      @{ $self->_clean_messages($a{messages}) } ],
+        stream   => OldAgent::JSON::num(1),
+    );
+    $payload{options} = \%options if %options;
+
+    my $full = '';
+    my $serr;
+    my $r = OldAgent::HTTP::stream_request(
+        url     => $url,
+        method  => 'POST',
+        headers => $self->_headers(),
+        body    => OldAgent::JSON::encode(\%payload),
+        timeout => $self->{timeout},
+        on_line => sub {
+            my ($line) = @_;
+            my ($d, $derr) = OldAgent::JSON::decode($line);
+            return if defined $derr;
+            if (ref($d) eq 'HASH' && defined $d->{error}) {
+                $serr = 'ollama error: ' . $d->{error};
+                return;
+            }
+            my $c;
+            if (ref($d->{message}) eq 'HASH') {
+                $c = defined $d->{message}{content} ? $d->{message}{content}
+                    : $d->{message}{response};
+            }
+            if (defined $c && length $c) {
+                $full .= $c;
+                $a{token}->($c);
+            }
+        },
+    );
+    if ($serr) { return (undef, $serr) }
+    if ($r->{error} && !length $full) {
+        return (undef, "request to $url failed: " . $r->{error} . ' (via ' . $r->{backend} . ')');
+    }
+    return ($full, undef);
 }
 
 # ------------------------------------------------------------- messages ---
@@ -80,9 +217,10 @@ sub _clean_messages {
 sub _headers {
     my ($self, %a) = @_;
     my %h = ('Content-Type' => 'application/json');
+    my $style = defined $a{style} ? $a{style} : 'bearer';
     my $key = $self->{cfg}->get('api_key');
     if (defined $key && length $key) {
-        if ($a{style} eq 'anthropic') {
+        if ($style eq 'anthropic') {
             $h{'x-api-key'} = $key;
             $h{'anthropic-version'} = '2023-06-01';
         } else {
@@ -102,6 +240,8 @@ sub _post {
         body    => $body,
         timeout => $self->{timeout},
         backend => $self->{backend},
+        via_proxy => $self->{cfg}->get('proxy'),
+        cfg       => $self->{cfg},
     );
     $self->{last_meta} = { %{ $self->{last_meta} },
                            http => $r->{status}, transport => $r->{backend} };
@@ -310,6 +450,8 @@ sub list_models {
         url => $url, method => 'GET',
         headers => $self->_headers(style => $style),
         timeout => $self->{timeout}, backend => $self->{backend},
+        via_proxy => $self->{cfg}->get('proxy'),
+        cfg       => $self->{cfg},
     );
     return (undef, "GET $url failed: " . ($r->{error} || "http $r->{status}"))
         if !$r->{status} || $r->{status} < 200 || $r->{status} > 299;

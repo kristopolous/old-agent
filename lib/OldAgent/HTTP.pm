@@ -72,6 +72,13 @@ sub request {
     my $body    = $a{body};
     my $timeout = defined $a{timeout} ? $a{timeout} : 60;
 
+    # legacy-box proxy routing: if an oa-proxy is configured and this is an
+    # https url, relay through it (the box has no TLS of its own).
+    if ($a{via_proxy} && $url =~ /^https:/i) {
+        my $pr = _via_proxy(\%a);
+        return $pr if defined $pr && $pr->{backend} eq 'proxy';
+    }
+
     my ($backend, $err) = pick_backend(url => $url, backend => $a{backend});
     return { ok => 0, error => $err } if $err;
 
@@ -87,6 +94,96 @@ sub request {
     else                           { $r = _socket(%call) }
     $r->{backend} = $backend;
     return $r;
+}
+
+# relay a request through an oa-proxy (plain http) and map its JSON reply onto
+# this module's { ok, content, status, headers, error, backend } shape.
+# returns undef to signal "fall through to a local backend".
+sub _via_proxy {
+    my ($a) = @_;
+    my $addr = $a->{via_proxy};
+    return undef unless defined $addr && length $addr;
+    my $cfg = $a->{cfg};
+    eval { require OldAgent::Proxy; 1 } or do {
+        $@ =~ /Can't locate/ or return undef;
+        return { ok => 0, error => "proxy module: $@", backend => 'proxy' };
+    };
+    my ($resp, $e) = OldAgent::Proxy::request($cfg, $addr,
+        url     => $a->{url},
+        method  => uc(defined $a->{method} ? $a->{method} : 'GET'),
+        headers => $a->{headers} || {},
+        body    => $a->{body},
+        timeout => (defined $a->{timeout} ? $a->{timeout} : 60),
+    );
+    if ($e) {
+        # proxy unreachable / transport fail: let the caller try local too
+        return { ok => 0, error => "proxy: $e", backend => 'proxy' };
+    }
+    return {
+        ok      => ($resp->{ok} ? 1 : 0),
+        status  => $resp->{status},
+        content => $resp->{body},
+        body    => $resp->{body},
+        headers => $resp->{headers},
+        reason  => $resp->{reason},
+        backend => 'proxy',
+    };
+}
+
+# stream_request(url, method, headers, body, timeout, on_line => CODE)
+# reads the response body line by line AS IT ARRIVES, calling on_line for
+# each. curl only (it is the one transport that can unbuffer). returns
+# { ok, lines, body, backend, error }.
+sub stream_request {
+    my (%a) = @_;
+    my $url = $a{url} or return { ok => 0, error => 'no url given' };
+    my $on  = ref($a{on_line}) eq 'CODE' ? $a{on_line} : undef;
+    return { ok => 0, error => 'stream needs an on_line callback' } unless $on;
+    my $bin = OldAgent::Util::which('curl');
+    return { ok => 0, error => 'streaming needs curl (not installed)' }
+        unless $bin;
+    my $method  = uc(defined $a{method} ? $a{method} : 'POST');
+    my $timeout = defined $a{timeout} ? $a{timeout} : 60;
+    my @argv = ($bin, '-sS', '--no-buffer', '--max-time', $timeout, '-L');
+    push @argv, '-X', $method if $method ne 'GET' || defined $a{body};
+    my $in;
+    if (defined $a{body}) {
+        $in = OldAgent::Util::tmpfile('sbody');
+        my $err = OldAgent::Util::spew($in, $a{body});
+        return { ok => 0, error => $err } if $err;
+        push @argv, '--data-binary', '@' . $in;
+    }
+    for my $k (sort keys %{ $a{headers} || {} }) {
+        push @argv, '-H', "$k: $a{headers}{$k}";
+    }
+    push @argv, $a{url};
+
+    require IPC::Open2;
+    my ($rd, $wr);
+    my $pid = eval { IPC::Open2::open2($rd, $wr, @argv) };
+    if (!$pid) {
+        unlink($in) if defined $in;
+        return { ok => 0, error => 'cannot start curl: ' . ($@ || $!) };
+    }
+    close $wr;                        # close our write end: EOF when curl exits
+    my @lines;
+    my $body = '';
+    while (my $line = <$rd>) {
+        $line =~ s/\r?\n\z//;
+        push @lines, $line;
+        $body .= $line . "\n";
+        $on->($line);
+    }
+    close $rd;
+    waitpid($pid, 0);
+    my $exit = $? >> 8;
+    unlink($in) if defined $in;
+    if ($exit != 0 && !@lines) {
+        return { ok => 0, error => "curl exited $exit with no output",
+                 body => $body, lines => [], backend => 'curl' };
+    }
+    return { ok => 1, lines => \@lines, body => $body, backend => 'curl',
+             error => undef };
 }
 
 # ---------------------------------------------------------------- curl ---

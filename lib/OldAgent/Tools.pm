@@ -69,6 +69,7 @@ sub call {
         'ls' => 'list', 'dir' => 'list', 'grep' => 'find', 'search' => 'find',
         'shell' => 'bash', 'exec' => 'bash', 'run' => 'bash', 'sh' => 'bash',
         'finish' => 'done', 'complete' => 'done', 'submit' => 'done',
+        'get' => 'fetch', 'download' => 'fetch', 'url' => 'fetch',
     );
     $name = $alias{$name} if $alias{$name};
     my $m = "tool_$name";
@@ -109,6 +110,15 @@ sub _path {
     return ($abs, undef);
 }
 
+# the path argument, tolerant of the names models actually use
+sub _path_arg {
+    my ($self, $a) = @_;
+    for my $k ('path', 'file', 'filename', 'file_path', 'filepath', 'p', 'file_name', 'filepath', 'location') {
+        return $a->{$k} if defined $a->{$k} && length $a->{$k};
+    }
+    return undef;
+}
+
 sub _int {
     my ($v, $d) = @_;
     return $d unless defined $v;
@@ -126,7 +136,7 @@ sub _bool {
 
 sub tool_read {
     my ($self, $a) = @_;
-    my ($path, $err) = $self->_path($a->{path} || $a->{file} || $a->{filename});
+    my ($path, $err) = $self->_path($self->_path_arg($a));
     return { ok => 0, output => $err } if $err;
     return { ok => 0, output => "no such file: $path" } unless -e $path;
     return { ok => 0, output => "not a file: $path" }   if -d $path;
@@ -156,7 +166,7 @@ sub tool_read {
 
 sub tool_write {
     my ($self, $a) = @_;
-    my ($path, $err) = $self->_path($a->{path} || $a->{file} || $a->{filename});
+    my ($path, $err) = $self->_path($self->_path_arg($a));
     return { ok => 0, output => $err } if $err;
     my $content = $a->{content};
     $content = $a->{text} if !defined $content && defined $a->{text};
@@ -171,7 +181,7 @@ sub tool_write {
 
 sub tool_edit {
     my ($self, $a) = @_;
-    my ($path, $err) = $self->_path($a->{path} || $a->{file});
+    my ($path, $err) = $self->_path($self->_path_arg($a));
     return { ok => 0, output => $err } if $err;
     return { ok => 0, output => "no such file: $path" } unless -f $path;
     my ($find, $replace);
@@ -215,7 +225,7 @@ sub tool_edit {
 
 sub tool_list {
     my ($self, $a) = @_;
-    my ($path, $err) = $self->_path(defined $a->{path} && length $a->{path} ? $a->{path} : '.');
+    my ($path, $err) = $self->_path($self->_path_arg($a) || '.');
     return { ok => 0, output => $err } if $err;
     return { ok => 0, output => "not a directory: $path" } unless -d $path;
     my $glob  = $a->{glob};
@@ -248,7 +258,7 @@ sub tool_find {
     return { ok => 0, output => 'missing "pattern" argument' } unless defined $pattern;
     my $re = eval { qr/$pattern/ };
     return { ok => 0, output => "bad regex: $@" } if $@;
-    my ($path, $err) = $self->_path(defined $a->{path} && length $a->{path} ? $a->{path} : '.');
+    my ($path, $err) = $self->_path($self->_path_arg($a) || '.');
     return { ok => 0, output => $err } if $err;
     my $glob  = $a->{glob};
     my $re_g  = $glob ? OldAgent::Util::glob_to_regex($glob) : undef;
@@ -306,6 +316,65 @@ sub _walk {
         closedir($dh);
     }
     return @out;
+}
+
+sub tool_fetch {
+    my ($self, $a) = @_;
+    my $url = $a->{url};
+    $url = $a->{uri} if !defined $url && defined $a->{uri};
+    return { ok => 0, output => 'missing "url" argument' }
+        unless defined $url && length $url;
+    $url = "http://$url" unless $url =~ m{^https?://}i;
+    my $md  = _bool($a->{markdown});
+    my $max = _int($a->{max_bytes}, $a->{max_chars});
+    $max = 0 if !defined $max || $max < 1;
+    my $proxy = $self->{cfg} ? $self->{cfg}->get('proxy') : '';
+    my $is_https = ($url =~ /^https:/i) ? 1 : 0;
+
+    # https through the proxy (the box itself has no TLS)
+    if ($is_https && $proxy) {
+        eval { require OldAgent::Proxy; 1 };
+        if ($@) {
+            return { ok => 0, output => "proxy module unavailable: $@" };
+        }
+        my ($text, $err) = OldAgent::Proxy::fetch($self->{cfg}, $proxy, $url,
+            format => ($md ? 'markdown' : 'text'),
+            max_bytes => ($max ? $max : 20000),
+            timeout => 120);
+        return { ok => 0, output => "proxy fetch failed: $err" } if $err;
+        return { ok => 1, output => $text };
+    }
+
+    # http (or https with no proxy) via the box's own backends
+    require OldAgent::HTTP;
+    my $r = OldAgent::HTTP::request(
+        url => $url, method => 'GET',
+        headers => { 'User-Agent' => 'oldagent/0.1' },
+        timeout => 60,
+    );
+    if (!$r->{ok} || ($r->{status} && ($r->{status} < 200 || $r->{status} > 299))) {
+        return { ok => 0, output => "fetch failed: " . ($r->{error} || "http $r->{status}") };
+    }
+    my $body = defined $r->{content} ? $r->{content} : '';
+    if ($md) {
+        # crude html -> text: strip tags and collapse whitespace
+        $body =~ s|<script\b[^>]*>.*?</script>||is;
+        $body =~ s|<style\b[^>]*>.*?</style>||is;
+        $body =~ s/<[^>]+>/\n/g;
+        $body =~ s/&nbsp;/ /g;
+        $body =~ s/&amp;/&/g;
+        $body =~ s/&lt;/</g;
+        $body =~ s/&gt;/>/g;
+        $body =~ s/&quot;/"/g;
+        $body =~ s/&#39;/'/g;
+        $body =~ s/\n\s*\n/\n\n/g;
+        $body =~ s/^[ \t\r]+//gm;
+        $body =~ s/ +/ /g;
+    }
+    $body = substr($body, 0, $max) if $max && length($body) > $max;
+    $body = OldAgent::Util::rstrip($body);
+    $body = '(no content)' unless length $body;
+    return { ok => 1, output => $body };
 }
 
 sub tool_bash {

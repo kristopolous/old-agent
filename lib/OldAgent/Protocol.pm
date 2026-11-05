@@ -14,6 +14,7 @@ use strict;
 use warnings;
 
 use OldAgent::JSON ();
+use OldAgent::Util ();
 
 my %TAGS = (tool => 1, oldagent => 1, oa => 1, json => 1, '' => 1);
 
@@ -87,6 +88,32 @@ sub parse {
     # fence protocol entirely and emit their own form:
     #   <|tool_call>call:bash{command: "echo hi"}<tool_call|>
     push @calls, _native_calls($text);
+
+    # OpenAI-style XML markup (qwen via ollama emits this):
+    #   <function=read>
+    #     <parameter=path>/tmp/x.txt</parameter>
+    #   </function>
+    # parameter values are XML-ish text: plain scalars, numbers, booleans, or
+    # inline JSON (object/array) which we decode when it looks like one.
+    while ($text =~ /<function=([A-Za-z_][\w.-]*)\s*>(.*?)<\/function>/gs) {
+        my ($name, $body) = (lc($1), $2);
+        my %args;
+        while ($body =~ /<parameter\s*(?:name="([^"]+)"|=\s*([A-Za-z_][\w.-]*)|([A-Za-z_][\w.-]*))?\s*>(.*?)<\/parameter>/gs) {
+            my ($k, $v) = ((defined $1 ? $1 : (defined $2 ? $2 : $3)), $4);
+            $k = lc($k) if defined $k && length $k;
+            next unless defined $k && length $k;
+            $v =~ s/^\s+//; $v =~ s/\s+$//;
+            if ($v =~ /^(\{.*\}|\[.*\])$/s) {
+                my ($j, $je) = OldAgent::JSON::decode($v);
+                $v = $j unless defined $je;
+            }
+            elsif ($v =~ /^-?\d+$/) { $v = $v + 0 }
+            elsif ($v =~ /^(true|false)$/i) { $v = (lc($v) eq 'true') ? 1 : 0 }
+            $args{$k} = $v;
+        }
+        next unless keys %args;
+        push @calls, { tool => $name, args => \%args, raw => { xml => $1 } };
+    }
 
     my %seen;
     my @uniq;
@@ -180,6 +207,78 @@ sub _fenced_blocks {
 }
 
 # results: list of { tool, ok, output } -> one user message body
+sub visible {
+    # (reply) -> (prose, tools, results)
+    # the human-facing prose, plus the protocol blocks that are NOT prose:
+    # ```tool lines and ```result lines.  the desktop renders those as one
+    # subtle line each instead of raw JSON.
+    my ($text) = @_;
+    return ('', '', '') unless defined $text && length $text;
+    my ($prose, $tools, $results) = _visible_split($text);
+    return ($prose, $tools, $results);
+}
+
+sub _visible_split {
+    my ($text) = @_;
+    my @prose;
+    my @tools;
+    my @results;
+    my $in;
+    my $fence;
+    my $kind;
+    my $fn;
+    my $fnargs;
+    for my $l (split(/\n/, defined $text ? $text : '', -1)) {
+        if (!$in && !$fn && $l =~ /^\s*(```+|~~~+)\s*(tool|json|oldagent|oa|result)?\s*$/i) {
+            $in = 1;
+            $fence = $1;
+            $kind = (defined $2 ? lc($2) : '');
+            next;
+        }
+        if (!$in && !$fn && $l =~ /^\s*<function=([A-Za-z_][\w.-]*)[^<>]*>\s*$/) {
+            $fn = lc($1);
+            $fnargs = '';
+            next;
+        }
+        if ($in) {
+            if ($l =~ /^\s*\Q$fence\E\s*$/) {
+                $in = '';
+                next;
+            }
+            push @tools, $l if $kind eq 'tool';
+            push @results, $l if $kind eq 'result';
+            next;
+        }
+        if ($fn) {
+            if ($l =~ /^\s*<\/function>\s*$/) {
+                push @tools, "<function=$fn> " . OldAgent::Util::one_line($fnargs)
+                    if length $fnargs;
+                $fn = '';
+                next;
+            }
+            $fnargs .= $l . "\n";
+            next;
+        }
+        # a bare {"tool": ...} object standing alone is a call, not prose
+        if ($l =~ /^\s*\{.*\}\s*$/s && $l =~ /"tool"\s*:/) {
+            push @tools, $l;
+            next;
+        }
+        # native wrapper tags are protocol, never prose
+        next if $l =~ /^\s*<\|?tool_call\|?>\s*$/i;
+        next if $l =~ /^\s*<\/\|?tool_call\|?>\s*$/i;
+        next if $l =~ /^\s*(?:TOOL|OA|oldagent)\s*:\s*\{.*\}\s*$/i;
+        push @prose, $l;
+    }
+    # an unclosed fence or function block at end of text
+    if ($in && $kind eq 'tool') { push @tools, '(unclosed tool block)' }
+    if ($fn) { push @tools, "<function=$fn> (unclosed)" }
+    my $prose = join("\n", @prose);
+    $prose =~ s/^\s+//;
+    $prose =~ s/\s+$//;
+    return ($prose, join("\n", @tools), join("\n", @results));
+}
+
 sub results_block {
     my ($results) = @_;
     my @lines;
