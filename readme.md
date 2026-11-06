@@ -30,16 +30,6 @@ Here's the gui, `oa desktop`
 "Ok" you say, "what about something older". Alright, here you go:
 <img alt="next" src="https://github.com/user-attachments/assets/b523bf02-1815-490c-8d83-179795a9bc4a" />
 
-
-## why perl, and not C
-
-C would need libssl headers that a 2000-era box does not have, and building
-them is a weekend you will never get back. Perl 5.6 shipped with the OS. For
-TLS we do not link anything: we shell out to the `curl` or `wget` that is
-already there, and fall back to a raw `IO::Socket::INET` client for plain
-http (local proxies, ollama, a gateway on the LAN). Nothing here needs a
-compiler, a CPAN mirror, or root.
-
 ## requirements
 
 * perl 5.006 (2000) or newer. Nothing from CPAN. (perl 5.001? see `oa1`
