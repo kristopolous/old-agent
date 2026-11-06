@@ -21,7 +21,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.9';
+my $VERSION = '0.1.10';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
@@ -1192,6 +1192,7 @@ sub main {
         elsif ($opt eq '--utf8')      { $cfg{ascii} = 0 }
         elsif ($opt eq '-p')          { $cmd = 'ask'; push @rest, shift @args }
         elsif ($opt eq '--cd')        { my $d = shift @args; chdir($d) || die "cannot cd to $d: $!\n" }
+        elsif ($opt eq '--proxy')     { shift @args; print STDERR "oa1: --proxy ignored (oa1 talks to the model directly and has no fetch tool)\n" }
         elsif ($opt eq '-h' || $opt eq '--help') { help(); return 0 }
         elsif ($opt eq '--version')   { print "oa1 $VERSION (perl $])\n"; return 0 }
         elsif ($opt =~ /^-/)          { print "unknown flag $opt (try --help)\n"; return 2 }

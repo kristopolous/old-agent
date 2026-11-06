@@ -42,6 +42,7 @@ my %FLAGS = (
     'root=s'       => 'root',
     'system=s'     => 'system_extra',
     'exec=s'       => 'exec_cmd',
+    'proxy=s'      => 'proxy',
 );
 
 my %PLAIN = (
@@ -89,6 +90,13 @@ sub run {
         next unless defined $plain{$p};      # Getopt autovivifies the keys
         my ($k, $v) = @{ $PLAIN{$p} };
         $ov{$k} = $v;
+    }
+    # --proxy takes what /proxy takes: host:port, with or without a scheme;
+    # "off" clears a proxy the rc file set
+    if (defined $ov{proxy}) {
+        $ov{proxy} =~ s{^https?://}{};
+        $ov{proxy} =~ s{/.*$}{};
+        $ov{proxy} = '' if $ov{proxy} =~ /^(?:off|none|clear)$/i;
     }
     my $quiet = delete $ov{quiet};
     my $verbose = delete $ov{verbose};
@@ -695,6 +703,7 @@ flags
   --model NAME      model id
   --key KEY         api key (or OPENAI_API_KEY etc; none = local endpoint)
   --exec CMD        provider=exec: pipe the transcript to CMD
+  --proxy HOST:PORT oa-proxy on a modern box (https, fetch, mcp); off = none
   --http NAME       curl | wget | httptiny | lwp | socket | auto
   --root DIR        refuse file writes outside DIR
   --turns N         max tool round trips per task (default 12)

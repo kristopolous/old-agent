@@ -90,6 +90,7 @@ api_key  = put-your-key-here      # or OPENAI_API_KEY, never commit this
 approve  = ask                    # ask | auto
 root     = /srv/build             # refuse writes outside this
 http     = auto                   # curl | wget | httptiny | lwp | socket
+proxy    = 10.0.0.126:8470         # oa-proxy on a modern box, or --proxy
 ```
 
 ## how it drives the model
@@ -180,7 +181,7 @@ lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
 util/desk-trace.pl     drives the desktop through a conversation under xvfb
                        and reports rebuilds, self-resizing, screen/history drift
-t/                     324 tests, no network needed (t/97 is oa1 against a
+t/                     345 tests, no network needed (t/97 is oa1 against a
                        fake ollama on a local socket)
 ```
 
@@ -265,7 +266,30 @@ oa-proxy --port 8470 --mcp ~/.oldagent/mcp.json \
          --lightpanda ~/.local/bin/lightpanda
 ```
 
+It listens on every interface (0.0.0.0) and says how to reach it as it
+starts: the `/proxy host:port` line to type in `oa` on the old box, one per
+address this machine has, and what it can do (fetch, lightpanda, which mcp
+servers loaded, where screenshots go). Every request is then logged as one
+line: who asked, what for, how it went, how long it took. `--verbose` adds
+detail; `--quiet` silences it; `--host 127.0.0.1` keeps it local.
+
+On the old box, `oa --proxy host:port` does what `/proxy host:port` does
+in the session (`--proxy off` ignores one the rc file set).
+
 ## changelog
+
+0.1.10
+- `oa-proxy` says how to connect to it when it starts (the `/proxy
+  host:port` to type on the old box, one per address this machine has, and
+  what it can do) and logs every request as one line (client, endpoint,
+  url or mcp tool, ok or the error, size, seconds). it used to say nothing
+  at all. it binds 0.0.0.0 by default now (it was 127.0.0.1, which no old
+  box could reach); `--host 127.0.0.1` keeps it local, `--quiet` silences
+  it. `/status` now reports lightpanda as present when it is on PATH, not
+  only when given as a full path.
+- `oa --proxy HOST:PORT` sets the proxy from the command line (`off`
+  clears one from the rc file). `oa1` accepts and ignores it, since the
+  handoff passes every flag through.
 
 0.1.9
 - ollama native (`/api/chat`): the system prompt was sent as a top-level

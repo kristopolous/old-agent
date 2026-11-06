@@ -32,7 +32,7 @@ BEGIN {
 
 my %opt = (
     port       => 8470,
-    host       => '127.0.0.1',
+    host       => '0.0.0.0',
     mcp_cfg    => '',
     lightpanda => ($^O eq 'linux' ? 'lightpanda' : 'lightpanda'),
     shot_dir   => "/tmp/oa-shots-$$",
@@ -44,12 +44,20 @@ GetOptions(
     'lightpanda=s' => \$opt{lightpanda},
     'shot-dir=s'   => \$opt{shot_dir},
     'verbose'      => \$opt{verbose},
-) or die "usage: oa-proxy --port N [--host ADDR] [--mcp mcp.json] [--lightpanda PATH] [--shot-dir DIR]\n";
+    'quiet'        => \$opt{quiet},
+) or die "usage: oa-proxy [--port N] [--host ADDR] [--mcp mcp.json] [--lightpanda PATH] [--shot-dir DIR] [--verbose] [--quiet]\n";
 
+# _say: always (unless --quiet). _log: detail, --verbose only.
+sub _say {
+    my ($msg) = @_;
+    return if $opt{quiet};
+    my @t = localtime;
+    printf STDERR "%02d:%02d:%02d %s\n", $t[2], $t[1], $t[0], $msg;
+}
 sub _log {
     my ($msg) = @_;
     return unless $opt{verbose};
-    print STDERR "[oa-proxy] $msg\n";
+    _say($msg);
 }
 
 sub _now {
@@ -398,6 +406,66 @@ sub _shot {
     return { ok => 0, error => "cannot write $path" };
 }
 
+# the IPv4 addresses of this machine other than loopback: what an old box
+# on the LAN would put in /proxy. `ip` on linux, ifconfig elsewhere; an
+# empty list just means we could not tell.
+sub _lan_addrs {
+    my @out;
+    for my $cmd ('ip -o -4 addr 2>/dev/null', 'ifconfig 2>/dev/null', '/sbin/ifconfig 2>/dev/null') {
+        my $txt = `$cmd`;
+        next unless defined $txt && length $txt;
+        while ($txt =~ /\binet\s+(?:addr:)?(\d+\.\d+\.\d+\.\d+)/g) {
+            my $a = $1;
+            next if $a =~ /^127\./;
+            push @out, $a unless grep { $_ eq $a } @out;
+        }
+        last if @out;
+    }
+    return @out;
+}
+
+# what to type on the old box, and what this proxy can do for it. printed
+# on start (not just under --verbose): a bridge nobody can find is no use.
+sub _banner {
+    my $h = $opt{host};
+    my @lines;
+    push @lines, "oa-proxy listening on $h:$opt{port}";
+    if ($h eq '127.0.0.1' || $h eq 'localhost' || $h eq '::1') {
+        push @lines,
+            "  reachable from this machine only. an old box on the network needs",
+            "  the default: oa-proxy --port $opt{port}  (binds 0.0.0.0)";
+        push @lines, "  in oa on this machine: /proxy 127.0.0.1:$opt{port}";
+    } else {
+        my @addrs = ($h eq '0.0.0.0' || $h eq '::') ? _lan_addrs() : ($h);
+        if (@addrs) {
+            push @lines, "  in oa on the old box, type one of:";
+            push @lines, "    /proxy $_:$opt{port}" for @addrs;
+        } else {
+            push @lines, "  in oa on the old box: /proxy <this machine's address>:$opt{port}";
+        }
+        push @lines, "  or put  proxy = <address>:$opt{port}  in its ~/.oldagentrc";
+    }
+    my @can;
+    push @can, (eval { require HTTP::Tiny; 1 } ? 'fetch and https relay' : 'no fetch (HTTP::Tiny missing)');
+    push @can, (-x $opt{lightpanda} || _in_path($opt{lightpanda})
+        ? "markdown via $opt{lightpanda}" : "no lightpanda ($opt{lightpanda} not found; raw/text only)");
+    my @mcp = sort keys %MCP_SERVERS;
+    push @can, (@mcp ? "mcp: @mcp" : ($opt{mcp_cfg} ? "mcp: none loaded from $opt{mcp_cfg}" : 'no mcp (--mcp mcp.json)'));
+    push @can, "screenshots to $opt{shot_dir}";
+    push @lines, "  can do: " . join('; ', @can);
+    push @lines, "  each request is logged here; --verbose adds detail, --quiet silences all";
+    print STDERR join("\n", @lines), "\n";
+}
+
+sub _in_path {
+    my ($name) = @_;
+    return 0 if !defined $name || $name eq '' || $name =~ m{/};
+    for my $d (split /:/, ($ENV{PATH} || '')) {
+        return 1 if -x "$d/$name";
+    }
+    return 0;
+}
+
 # --- main loop ---
 my $server = IO::Socket::INET->new(
     LocalAddr => $opt{host},
@@ -406,10 +474,13 @@ my $server = IO::Socket::INET->new(
     Listen    => 16,
     ReuseAddr => 1,
 ) or die "oa-proxy: cannot bind $opt{host}:$opt{port}: $!\n";
+_banner() unless $opt{quiet};
 _log("listening on $opt{host}:$opt{port}");
 
 sub _handle {
     my ($fh) = @_;
+    my $peer = eval { $fh->peerhost } || '?';
+    my $t0 = _hires();
     my $reqline = <$fh>;
     return unless defined $reqline;
     $reqline =~ s/\r?\n$//;
@@ -445,7 +516,7 @@ sub _handle {
             version => '0.1',
             time => time,
             fetch => (eval { require HTTP::Tiny; 1 } ? 1 : 0),
-            lightpanda => (-x $opt{lightpanda} ? 1 : 0),
+            lightpanda => ((-x $opt{lightpanda} || _in_path($opt{lightpanda})) ? 1 : 0),
             mcp => (scalar @mcp_names > 0 ? 1 : 0),
             mcp_servers => [ sort keys %MCP_SERVERS ],
             screenshot => 1,
@@ -463,6 +534,29 @@ sub _handle {
         $resp = { ok => 0, error => "unknown path: $path" };
     }
     _http_response($fh, $resp);
+    # one line per request: who, what, how it went. the body's url / mcp
+    # tool is the useful bit, so it goes in too.
+    my $what = $path;
+    if ($body =~ /^\s*\{/) {
+        my ($b) = _json_decode($body);
+        if (ref $b eq 'HASH') {
+            $what .= " $b->{url}" if defined $b->{url};
+            $what .= " $b->{server}" if defined $b->{server};
+            $what .= "/$b->{tool}" if defined $b->{tool};
+            $what .= " (list)" if $b->{list};
+            $what .= " $b->{name}" if $path eq '/shot' && defined $b->{name};
+        }
+    }
+    my $how = $resp->{ok} ? 'ok' : "error: " . (defined $resp->{error} ? $resp->{error} : '?');
+    $how =~ s/\s+/ /g;
+    $how = substr($how, 0, 200) . '...' if length $how > 200;
+    my $size = defined $resp->{text} ? length($resp->{text}) : defined $resp->{body} ? length($resp->{body}) : 0;
+    _say(sprintf("%s  %s %s  -> %s%s  %.1fs", $peer, $method, $what, $how,
+        ($size ? " ${size}b" : ''), _hires() - $t0));
+}
+
+sub _hires {
+    return eval { require Time::HiRes; Time::HiRes::time() } || time;
 }
 
 while (my $client = $server->accept()) {

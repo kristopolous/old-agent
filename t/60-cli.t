@@ -5,7 +5,7 @@ use Test::More;
 use File::Spec ();
 use OldAgent::Util;
 
-plan tests => 30;
+plan tests => 32;
 
 my $perl = $^X;
 my $oa   = File::Spec->catfile('oa');
@@ -60,6 +60,12 @@ like($out, qr/"tool":"bash"/, 'tools shows the tool spec');
 
 ($rc, $out) = run(argv => ['config']);
 like($out, qr/^provider/m, 'config shows provider');
+
+# --proxy takes what /proxy takes and lands in the config; off clears it
+($rc, $out) = run(argv => ['--no-config', '--proxy', 'http://10.0.0.9:8470/', 'config']);
+like($out, qr/^proxy\s+10\.0\.0\.9:8470$/m, '--proxy sets the proxy (scheme and path stripped)');
+($rc, $out) = run(argv => ['--no-config', '--proxy', 'off', 'config']);
+like($out, qr/^proxy\s+\(unset\)$/m, '--proxy off clears it');
 
 # --- a real conversation with the built-in echo model -----------------
 ($rc, $out) = run(
