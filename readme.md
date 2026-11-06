@@ -21,7 +21,10 @@ oa do "find every TODO in src/ and write them to todos.txt"
 Proof? Here you go, HP-UX on 32-bit PA-RISC
 <img width="1280" height="1024" alt="hpux" src="https://github.com/user-attachments/assets/d2942ed2-625c-4e3b-9108-7521d82531bc" />
 
-And here is the gui, `oa desktop`
+Ok What about Solaris with OPEN LOOK?
+<img width="1024" height="768" alt="solaris8" src="https://github.com/user-attachments/assets/93e3a61d-78c4-4a8b-a894-18968f06ffeb" />
+
+Here's the gui, `oa desktop`
 <img width="1280" height="1024" alt="desktop" src="https://github.com/user-attachments/assets/18e64aec-9e40-4edd-9324-0e9c9a436e72" />
 
 "Ok" you say, "what about something older". Alright, here you go:
