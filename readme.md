@@ -264,7 +264,7 @@ oa-proxy --port 8470 --mcp ~/.oldagent/mcp.json \
 
 ## changelog
 
-unreleased
+0.1.9
 - ollama native (`/api/chat`): the system prompt was sent as a top-level
   `system` field, which that endpoint ignores (it belongs to `/api/generate`),
   so a model behind a `/v1`-less base url never learned it had tools and
