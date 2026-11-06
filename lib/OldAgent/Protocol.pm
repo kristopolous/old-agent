@@ -1,7 +1,10 @@
 package OldAgent::Protocol;
-# The wire format between oldagent and any model, including models that have
-# never heard of function calling.  A tool call is a fenced block tagged
-# `tool` holding one JSON object.  Results come back as `result` blocks.
+# The wire format between oldagent and the model: text, so it is the same
+# over every endpoint shape (ollama native, OpenAI-compatible, Anthropic,
+# exec) and needs no client library on the old box.  A tool call is a fenced
+# block tagged `tool` holding one JSON object.  Results come back as
+# `result` blocks.  Native function calling, where an endpoint returns it,
+# is translated into this form.
 #
 #   ```tool
 #   {"tool":"bash","args":{"cmd":"ls -l"}}

@@ -12,6 +12,10 @@ dependencies**, so it runs on the perl that is already sitting on an old
 install - think 2005, think Ubuntu 12.04, think a Solaris box nobody will
 patch, think a build container with `perl 5.6.1` and nothing else.
 
+The machine is old. The model is not: point it at whatever you run today -
+ollama on a box down the hall, or a hosted model through `oa-proxy` when
+the old box cannot speak TLS. Nothing here is tuned for weak models.
+
 ```
 oa doctor
 oa
@@ -95,9 +99,13 @@ proxy    = 10.0.0.126:8470         # oa-proxy on a modern box, or --proxy
 
 ## how it drives the model
 
-Old models do not have function calling, so the protocol is text and every
-model on earth can follow it. The agent asks for a tool with a fenced block,
-execution stops, and results come back in the next message:
+The protocol is text, not an API feature: a tool call is a fenced block in
+the reply, so it works the same over ollama's native endpoint, anything
+OpenAI-shaped, Anthropic, or a command the transcript is piped into, and
+the old box needs no client library to speak it. A modern model follows it
+without being told twice (native `tool_calls` are translated into the same
+form when an endpoint returns them). The agent asks for a tool with a
+fenced block, execution stops, and results come back in the next message:
 
     ```tool
     {"tool":"bash","args":{"cmd":"ls -l"}}
@@ -109,7 +117,8 @@ execution stops, and results come back in the next message:
 
 Tools: `read`, `write`, `edit`, `list`, `find`, `bash`, `done`. The parser is
 forgiving (` ```json `, `name`/`arguments`, flat args, unterminated fences,
-trailing commas) because models are children. `bash` asks a human first
+trailing commas) because even good models get the shape slightly wrong
+now and then. `bash` asks a human first
 unless you pass `-y`; with no tty it refuses.
 
 ## terminal interface
