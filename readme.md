@@ -3,7 +3,7 @@
 
 </p>
 
-A tiny agent for machines that time forgot.
+A tiny agent for machines that time forgot to do agentic sysadmin tasks on older boxes.
 
 `oldagent` is a helper like hermes or any of the other terminal agents: it
 reads files, writes files, runs shell commands, and talks to a model with or
