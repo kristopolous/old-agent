@@ -16,7 +16,7 @@ my %DEFAULT = (
     temperature  => '',
     max_tokens   => '1024',
     thinking     => '0',         # thinking models: 1 = allow reasoning, 0 = off
-    timeout      => '120',
+    timeout      => '0',          # seconds per model call; 0 = wait forever
     http         => 'auto',
     tools        => '1',
     approve      => 'ask',       # ask | auto | off

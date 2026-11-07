@@ -24,7 +24,7 @@ sub new {
     my $self = {
         cfg       => $cfg,
         backend   => $cfg->get('http'),
-        timeout   => $cfg->get('timeout', 120) || 120,
+        timeout   => 0 + ($cfg->get('timeout', 0) || 0),   # 0 = no limit
         last_meta => {},
     };
     return bless $self, $class;

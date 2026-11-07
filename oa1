@@ -21,7 +21,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.10';
+my $VERSION = '0.1.11';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
@@ -32,7 +32,7 @@ my %cfg = (
     approve  => 'ask',       # ask | auto | off
     tools    => 1,
     turns    => 12,
-    timeout  => 120,
+    timeout  => 0,          # seconds per model call; 0 = wait forever
     thinking => '0',
     quiet    => 0,
     debug    => 0,
@@ -1000,11 +1000,10 @@ sub show_result {
         $what .= " " . arg_path($args);
     }
     print "  [$what] ", ($r->{ok} ? 'ok' : 'failed'), "\n";
+    # the whole result, nothing cut (the tool already clips it for the model)
     my @l = split(/\n/, $r->{output});
-    my $n = @l > 20 ? 20 : scalar @l;
     my $i;
-    for $i (0 .. $n - 1) { print "    ", fold($l[$i]), "\n" }
-    print "    (", @l - 20, " more lines)\n" if @l > 20;
+    for $i (0 .. $#l) { print "    ", fold($l[$i]), "\n" }
 }
 
 # --------------------------------------------------------------- config --
@@ -1082,7 +1081,7 @@ flags
   --model NAME     model id
   --key KEY        api key, if the endpoint wants one
   --turns N        max tool round trips per task (default 12)
-  --timeout N      seconds per model call (default 120)
+  --timeout N      seconds per model call (default: no limit)
   -y               run bash commands without asking
   --no-tools       no tools, just chat
   --config FILE    use this rc file (default ~/.oldagentrc)
@@ -1199,7 +1198,7 @@ sub main {
         else { push @rest, $opt }
     }
     $cfg{turns} = 12 unless $cfg{turns} =~ /^\d+$/ && $cfg{turns} > 0;
-    $cfg{timeout} = 120 unless $cfg{timeout} =~ /^\d+$/;
+    $cfg{timeout} = 0 unless $cfg{timeout} =~ /^\d+$/;
     if ($cfg{ascii} eq '-1') {
         my $lang = join(' ', map { defined $ENV{$_} ? $ENV{$_} : '' } qw(LC_ALL LC_CTYPE LANG));
         $cfg{ascii} = ($lang =~ /utf-?8/i) ? 0 : 1;

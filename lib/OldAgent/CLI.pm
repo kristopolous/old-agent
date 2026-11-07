@@ -358,11 +358,13 @@ sub repl_command {
     if ($c eq 'clear')             { $agent->reset; print "(history cleared)\n"; return }
     if ($c eq 'undo')              { my $n = $agent->undo; print "(dropped $n message(s))\n"; return }
     if ($c eq 'history') {
+        # whole messages, nothing cut
         my $i = 0;
         for my $m (@{ $agent->history }) {
             $i++;
-            printf "%3d %-9s %s\n", $i, $m->{role},
-                OldAgent::Util::clip(OldAgent::Util::one_line($m->{content}), 90);
+            my $body = OldAgent::Util::strip(defined $m->{content} ? $m->{content} : '');
+            $body =~ s/\n/\n              /g;
+            printf "%3d %-9s %s\n", $i, $m->{role}, $body;
         }
         print "(empty)\n" unless $i;
         return;
@@ -707,7 +709,7 @@ flags
   --http NAME       curl | wget | httptiny | lwp | socket | auto
   --root DIR        refuse file writes outside DIR
   --turns N         max tool round trips per task (default 12)
-  --timeout N       seconds per model call (default 120)
+  --timeout N       seconds per model call (default: no limit)
   -y, --yes         run bash commands without asking
   --no-tools        disable tools entirely
   -F, --file FILE   attach a file to the prompt (repeatable)

@@ -180,7 +180,7 @@ lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
 util/desk-trace.pl     drives the desktop through a conversation under xvfb
                        and reports rebuilds, self-resizing, screen/history drift
-t/                     345 tests, no network needed (t/97 is oa1 against a
+t/                     349 tests, no network needed (t/97 is oa1 against a
                        fake ollama on a local socket)
 ```
 
@@ -276,6 +276,21 @@ On the old box, `oa --proxy host:port` does what `/proxy host:port` does
 in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
+
+0.1.11
+- nothing shown on the terminal is cut any more. the `[tool]` line used to
+  clip each argument at 60 chars and the line at 160 and add "...", which
+  on an 80-column terminal wrapped onto a line of its own. the command is
+  shown bare and whole, a multi-line argument (a `write`) as an indented
+  block; `/history` prints whole messages; oa1 prints a whole result
+  instead of 20 lines and a count.
+- the model call has no timeout by default (it was 120 s). a modern model
+  thinking for three minutes is not a hung box, and the stream shows it is
+  alive. `--timeout N` or `timeout = N` in the rc sets a limit; 0 is none.
+  every http backend honours 0: curl and wget get no `--max-time` / `-T`,
+  the raw socket has no deadline. same in oa1.
+- readme: the premise is an old machine and a modern model; "old models
+  do not have function calling" is gone.
 
 0.1.10
 - `oa-proxy` says how to connect to it when it starts (the `/proxy

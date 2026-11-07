@@ -287,7 +287,7 @@ sub _run_one {
     my $name = $call->{tool};
     my $args = $call->{args};
     $self->{stats}{calls}++;
-    $self->emit('[tool] ' . $name . ' ' . OldAgent::Util::clip(_args_line($args), 160));
+    $self->emit('[tool] ' . $name . ' ' . _args_line($args));
 
     if ($name eq 'bash' && !$self->_approved($args)) {
         $self->{stats}{denied}++;
@@ -300,17 +300,28 @@ sub _run_one {
     return $r;
 }
 
+# the call as the human sees it: the command bare and whole, every other
+# argument in full. a multi-line value goes on its own lines, indented.
+# nothing is cut: a line clipped at 60 chars and a "..." wrapping onto a
+# line of its own looked like trash on an 80-column terminal.
 sub _args_line {
     my ($args) = @_;
     return '' unless ref($args) eq 'HASH';
-    my @p;
+    my (@line, @block);
     for my $k (sort keys %$args) {
         my $v = OldAgent::JSON::plain($args->{$k});
-        $v = OldAgent::Util::one_line($v);
-        $v = substr($v, 0, 60) . '...' if length($v) > 63;
-        push @p, "$k=$v";
+        $v = '' unless defined $v;
+        $v = OldAgent::Util::strip($v);
+        if ($v =~ /\n/) {
+            $v =~ s/^/    /mg;
+            push @block, "$k=\n$v";
+        } elsif ($k eq 'cmd' || $k eq 'command') {
+            unshift @line, $v;
+        } else {
+            push @line, "$k=$v";
+        }
     }
-    return join(' ', @p);
+    return join(' ', @line) . (@block ? "\n" . join("\n", @block) : '');
 }
 
 sub _approved {

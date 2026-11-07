@@ -148,7 +148,8 @@ sub stream_request {
         unless $bin;
     my $method  = uc(defined $a{method} ? $a{method} : 'POST');
     my $timeout = defined $a{timeout} ? $a{timeout} : 60;
-    my @argv = ($bin, '-sS', '--no-buffer', '--max-time', $timeout, '-L');
+    my @argv = ($bin, '-sS', '--no-buffer', '-L');
+    push @argv, '--max-time', $timeout if $timeout > 0;   # 0 = wait forever
     push @argv, '-X', $method if $method ne 'GET' || defined $a{body};
     my $in;
     if (defined $a{body}) {
@@ -190,14 +191,20 @@ sub stream_request {
              error => undef };
 }
 
+# a timeout of 0 means wait forever. the external tools take "no flag" for
+# that; the perl modules want a number, so they get a year.
+sub _forever { my ($t) = @_; return ($t && $t > 0) ? $t : 365 * 86400 }
+# the watchdog on a curl/wget child: a little past its own limit, or none
+sub _grace   { my ($t) = @_; return ($t && $t > 0) ? $t + 10 : 0 }
+
 # ---------------------------------------------------------------- curl ---
 
 sub _curl {
     my (%a) = @_;
     my $bin = OldAgent::Util::which('curl');
     my $outf = OldAgent::Util::tmpfile('body-out');
-    my @argv = ($bin, '-sS', '--max-time', $a{timeout}, '-o', $outf,
-                '-w', '%{http_code}');
+    my @argv = ($bin, '-sS', '-o', $outf, '-w', '%{http_code}');
+    push @argv, '--max-time', $a{timeout} if $a{timeout} > 0;   # 0 = wait forever
     push @argv, '-L';
     push @argv, '-X', $a{method} if $a{method} ne 'GET' || defined $a{body};
     my $in;
@@ -213,7 +220,7 @@ sub _curl {
     push @argv, $a{url};
 
     # stdout carries only the status code, so no deadlock and no mixing
-    my $r = OldAgent::Util::capture(argv => \@argv, timeout => $a{timeout} + 10);
+    my $r = OldAgent::Util::capture(argv => \@argv, timeout => _grace($a{timeout}));
     unlink($in) if defined $in;
     my $code = OldAgent::Util::strip($r->{out});
     my $status = $code =~ /^(\d{3})/ ? $1 + 0 : 0;
@@ -242,7 +249,8 @@ sub _wget {
     my $bin  = OldAgent::Util::which('wget');
     my $outf = OldAgent::Util::tmpfile('wget');
     # -nv keeps the "HTTP/1.1 404" line on stderr while staying quiet
-    my @argv = ($bin, '-nv', '-S', '-T', $a{timeout}, '-t', '1', '-O', $outf);
+    my @argv = ($bin, '-nv', '-S', '-t', '1', '-O', $outf);
+    push @argv, '-T', $a{timeout} if $a{timeout} > 0;   # 0 = wait forever
     for my $k (sort keys %{ $a{headers} }) {
         push @argv, "--header=$k: $a{headers}{$k}";
     }
@@ -255,7 +263,7 @@ sub _wget {
     }
     push @argv, $a{url};
 
-    my $r = OldAgent::Util::capture(argv => \@argv, timeout => $a{timeout} + 10);
+    my $r = OldAgent::Util::capture(argv => \@argv, timeout => _grace($a{timeout}));
     unlink($in) if defined $in;
 
     my ($body, undef) = OldAgent::Util::slurp($outf);
@@ -283,7 +291,7 @@ sub _wget {
 sub _tiny {
     my (%a) = @_;
     my $h = HTTP::Tiny->new(
-        timeout => $a{timeout},
+        timeout => _forever($a{timeout}),
         agent   => 'oldagent/' . ($OldAgent::VERSION || '0'),
     );
     my $r = eval {
@@ -306,7 +314,7 @@ sub _tiny {
 sub _lwp {
     my (%a) = @_;
     my $ua = LWP::UserAgent->new(
-        timeout => $a{timeout},
+        timeout => _forever($a{timeout}),
         agent   => 'oldagent/' . ($OldAgent::VERSION || '0'),
     );
     $ua->max_redirect(5);
@@ -340,7 +348,7 @@ sub _socket {
 
     my $sock = IO::Socket::INET->new(
         PeerAddr => $host, PeerPort => $port, Proto => 'tcp',
-        Timeout  => $a{timeout},
+        ($a{timeout} > 0 ? (Timeout => $a{timeout}) : ()),
     );
     return { ok => 0, error => "connect $host:$port failed: $!" } if !$sock;
     $sock->autoflush(1);
@@ -359,8 +367,8 @@ sub _socket {
     print($sock $a{body}) if defined $a{body};
 
     my $raw = '';
-    my $deadline = time() + $a{timeout};
-    while (time() < $deadline) {
+    my $deadline = $a{timeout} > 0 ? time() + $a{timeout} : 0;
+    while (!$deadline || time() < $deadline) {
         my $chunk;
         my $n = sysread($sock, $chunk, 8192);
         last if !defined $n || $n == 0;

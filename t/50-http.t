@@ -10,7 +10,7 @@ use OldAgent::Util;
 
 eval { require IO::Socket::INET; 1 } or plan(skip_all => 'no IO::Socket::INET');
 
-plan tests => 15;
+plan tests => 19;
 
 $SIG{ALRM} = sub { die "test timed out\n" };
 alarm(90);
@@ -24,7 +24,7 @@ my $port = $srv->sockport();
 my $pid = fork();
 if (!defined $pid) { plan(skip_all => "fork failed: $!") }
 if ($pid == 0) {
-    serve($srv, 10);
+    serve($srv, 20);
     exit 0;
 }
 
@@ -90,6 +90,19 @@ for my $backend ('socket', 'curl', 'wget', 'httptiny') {
             url => "$base/echo", method => 'GET', backend => $backend, timeout => 10,
         );
         is($r->{status}, 404, "$backend backend got a status line");
+    }
+}
+
+# timeout 0 is "wait forever", the default for a model call: no --max-time,
+# no -T, a year for the perl modules, no deadline on the socket
+for my $backend ('socket', 'curl', 'wget', 'httptiny') {
+    my $have = OldAgent::HTTP::_have($backend, 0);
+    SKIP: {
+        skip "$backend not available", 1 unless $have;
+        my $r = OldAgent::HTTP::request(
+            url => "$base/echo", method => 'GET', backend => $backend, timeout => 0,
+        );
+        is($r->{status}, 404, "$backend backend works with timeout 0");
     }
 }
 
