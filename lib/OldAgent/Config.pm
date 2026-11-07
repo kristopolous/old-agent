@@ -14,8 +14,8 @@ my %DEFAULT = (
     api_key      => '',
     key_env      => '',
     temperature  => '',
-    max_tokens   => '1024',
-    thinking     => '0',         # thinking models: 1 = allow reasoning, 0 = off
+    max_tokens   => '',            # reply cap; empty = none (the model decides)
+    thinking     => '',          # 1 forces reasoning on, 0 off; empty = the model decides
     timeout      => '0',          # seconds per model call; 0 = wait forever
     http         => 'auto',
     tools        => '1',

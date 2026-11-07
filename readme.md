@@ -180,7 +180,7 @@ lib/OldAgent/Doctor.pm environment report and self test
 util/compat-lint.pl    keeps the code 5.006-safe
 util/desk-trace.pl     drives the desktop through a conversation under xvfb
                        and reports rebuilds, self-resizing, screen/history drift
-t/                     349 tests, no network needed (t/97 is oa1 against a
+t/                     351 tests, no network needed (t/97 is oa1 against a
                        fake ollama on a local socket)
 ```
 
@@ -276,6 +276,17 @@ On the old box, `oa --proxy host:port` does what `/proxy host:port` does
 in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
+
+0.1.12
+- no reply cap by default. `max_tokens` was 1024, which a thinking model
+  spends before it says a word, and the error then told you to raise a
+  flag ("the model spent its whole token budget thinking ... raise
+  --max-tokens"). nothing is sent now unless `max_tokens` is set, and the
+  message for a reasoning-only reply says what actually stopped it.
+  anthropic requires a cap, so it gets 16384 when none is set.
+- `thinking` is unset by default: the `think` option is not sent to ollama
+  unless you set it to 1 or 0, so the model decides, as it does for any
+  other client. it used to be forced off. same in oa1.
 
 0.1.11
 - nothing shown on the terminal is cut any more. the `[tool]` line used to

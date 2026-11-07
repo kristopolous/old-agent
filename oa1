@@ -21,7 +21,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.11';
+my $VERSION = '0.1.12';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
@@ -33,7 +33,7 @@ my %cfg = (
     tools    => 1,
     turns    => 12,
     timeout  => 0,          # seconds per model call; 0 = wait forever
-    thinking => '0',
+    thinking => '',        # 1 forces reasoning on, 0 off; empty = the model decides
     quiet    => 0,
     debug    => 0,
     ascii    => -1,          # fold utf-8 punctuation to ascii; -1 = unless LANG says utf-8
@@ -347,7 +347,8 @@ sub chat_ollama {
     my $base = $cfg{base_url};
     $base =~ s!/+$!!;
     $base =~ s!/v1$!!;
-    my $want_think = ($cfg{thinking} eq '1') ? 1 : 0;
+    my %options = (temperature => \'0.2');
+    $options{think} = \($cfg{thinking} eq '1' ? 'true' : 'false') if $cfg{thinking} =~ /^[01]$/;
     # /api/chat has no top-level system field (that is /api/generate): the
     # prompt goes in as the first message, or the model never learns it
     # has tools and answers like a chatbot
@@ -356,7 +357,7 @@ sub chat_ollama {
         messages => [ { role => 'system', content => $system },
                       map { { role => $_->{role}, content => $_->{content} } } @$msgs ],
         stream   => \'true',
-        options  => { temperature => \'0.2', think => \($want_think ? 'true' : 'false') },
+        options  => \%options,
     );
     $stream_text = '';
     $stream_err  = '';

@@ -140,7 +140,7 @@ unlike($out, qr/```/, 'no raw fences in the transcript');
 open(my $lf, '<', $log) or die; my $reqs = do { local $/; <$lf> }; close $lf;
 like($reqs, qr/POST \/api\/chat HTTP\/1\.0/, 'request: POST /api/chat, HTTP/1.0');
 like($reqs, qr/"stream":true/, 'request: streaming on');
-like($reqs, qr/"think":false/, 'request: thinking off');
+unlike($reqs, qr/"think"/, 'request: no think option unless configured');
 like($reqs, qr/"messages":\[\{"content":"You are oldagent.*?","role":"system"\},\{"content":"what is in this directory\?","role":"user"\}/s, 'request: the system prompt is the first message (ollama ignores a top-level system field)');
 unlike($reqs, qr/"system":/, 'request: no top-level system field');
 my @bodies = ($reqs =~ /=== request\n.*?\r?\n\r?\n(.*?)\n(?==== request|\z)/gs);

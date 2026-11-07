@@ -187,7 +187,7 @@ sub _ollama_stream {
     my $mt = $self->{cfg}->get('max_tokens');
     $options{num_predict} = OldAgent::JSON::num($mt) if defined $mt && length $mt;
     my $think = $self->{cfg}->get('thinking');
-    $options{think} = OldAgent::JSON::num(defined $think && $think eq '1' ? 1 : 0);
+    $options{think} = OldAgent::JSON::num($think eq '1' ? 1 : 0) if defined $think && $think =~ /^[01]$/;
     my %payload = (
         model    => $self->{cfg}->get('model'),
         # /api/chat has no top-level system field (that is /api/generate):
@@ -347,8 +347,15 @@ sub _openai {
     if (!defined $text || !length $text) {
         my $reason = ref($msg) eq 'HASH' ? ($msg->{reasoning_content} || '') : '';
         if (length $reason) {
-            return (undef, 'the model spent its whole token budget thinking and '
-                            . 'produced no reply - raise --max-tokens');
+            # reasoning came back but no answer. with no cap of ours that is
+            # the model or the server stopping early; with one, it is ours.
+            my $cap = $self->{cfg}->get('max_tokens');
+            my $why = ($ch->[0]{finish_reason} || '') eq 'length'
+                ? (defined $cap && length $cap
+                    ? "it hit the max_tokens = $cap cap set in the config"
+                    : "the server stopped it at its own output limit")
+                : 'it stopped on its own';
+            return (undef, "the model reasoned but gave no reply: $why");
         }
     }
     if (ref($data->{usage}) eq 'HASH') {
@@ -367,11 +374,10 @@ sub _ollama {
     $options{temperature} = OldAgent::JSON::num($t) if defined $t && length $t;
     my $mt = $self->{cfg}->get('max_tokens');
     $options{num_predict} = OldAgent::JSON::num($mt) if defined $mt && length $mt;
-    # thinking models (qwen3 etc.) honour options.think; most others ignore
-    # it, so it is safe to always send for the ollama dialect.  Default is
-    # off: thinking burns the token budget and often empties the reply.
+    # options.think is sent only when `thinking` is set to 1 or 0; unset,
+    # the model and server decide, as they would for any other client.
     my $think = $self->{cfg}->get('thinking');
-    $options{think} = OldAgent::JSON::num(defined $think && $think eq '1' ? 1 : 0);
+    $options{think} = OldAgent::JSON::num($think eq '1' ? 1 : 0) if defined $think && $think =~ /^[01]$/;
     my %payload = (
         model    => $self->{cfg}->get('model'),
         # /api/chat has no top-level system field (that is /api/generate):
@@ -406,7 +412,8 @@ sub _anthropic {
         model      => $self->{cfg}->get('model'),
         system     => $a{system},
         messages   => $self->_clean_messages($a{messages}, { tool => 'user' }),
-        max_tokens => OldAgent::JSON::num($self->{cfg}->get('max_tokens') || 1024),
+        # anthropic requires a cap; with none configured, a large one
+        max_tokens => OldAgent::JSON::num($self->{cfg}->get('max_tokens') || 16384),
     );
     my $t = $self->{cfg}->get('temperature');
     $payload{temperature} = OldAgent::JSON::num($t) if defined $t && length $t;

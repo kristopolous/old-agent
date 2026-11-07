@@ -4,7 +4,7 @@
 # message with role system - on the one-shot path and the streaming path.
 use strict;
 use warnings;
-use Test::More tests => 8;
+use Test::More tests => 10;
 use FindBin;
 use lib "$FindBin::Bin/../lib";
 use OldAgent::Config ();
@@ -42,6 +42,7 @@ my ($body) = OldAgent::JSON::decode($sent[-1]{body});
 ok(!exists $body->{system}, 'one-shot: no top-level system field');
 is_deeply($body->{messages}[0], { role => 'system', content => 'SYS PROMPT' }, 'one-shot: system prompt is the first message');
 is($body->{messages}[1]{role}, 'user', 'one-shot: then the user');
+ok(!exists $body->{options}{num_predict}, 'one-shot: no reply cap by default');
 
 @sent = ();
 ($text, $err) = $p->chat_stream(system => 'SYS PROMPT', messages => [ { role => 'user', content => 'q' } ], token => sub { });
@@ -49,3 +50,4 @@ is($err, undef, 'stream: no error') or diag($err);
 ($body) = OldAgent::JSON::decode($sent[-1]{body});
 ok(!exists $body->{system}, 'stream: no top-level system field');
 is_deeply($body->{messages}[0], { role => 'system', content => 'SYS PROMPT' }, 'stream: system prompt is the first message');
+ok(!exists $body->{options}{num_predict}, 'stream: no reply cap by default');
