@@ -21,7 +21,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.12';
+my $VERSION = '0.1.13';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (

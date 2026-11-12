@@ -277,6 +277,20 @@ in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
 
+0.1.13
+- memory, on the large-response case. a multi-megabyte model reply used
+to be held in several copies at once (the slurped body, every NDJSON
+line, the decoded content, the reply itself), and perl does not give
+freed memory back to the machine, so one big reply pinned the whole
+process at its high-water mark -- 32 MB where it starts at about 13.
+`parse_ndjson` now walks the body one line at a time instead of holding
+every line alive at once, and a single reply longer than `history_chars`
+is clipped in history (head and tail kept), so a verbose one-off is no
+longer re-sent to the model -- and re-allocated -- on every later turn.
+that also saves tokens. the string decoder copies runs in chunks
+(`index` + one `substr`) instead of byte by byte, and the number match
+peeks 64 bytes instead of copying the rest of the document.
+
 0.1.12
 - no reply cap by default. `max_tokens` was 1024, which a thinking model
   spends before it says a word, and the error then told you to raise a

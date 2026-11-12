@@ -168,6 +168,15 @@ sub _trim_history {
         my $dropped = shift @$h;
         $total -= length(defined $dropped->{content} ? $dropped->{content} : '');
     }
+    # a single oversized reply (verbose models, thinking dumps) would
+    # otherwise survive the pop loop and be re-sent to the model -- and
+    # re-allocated in memory -- on every later turn. clip keeps head and
+    # tail, same as the window itself.
+    for my $m (@$h) {
+        my $c = $m->{content};
+        next unless defined $c && length($c) > $max;
+        $m->{content} = OldAgent::Util::clip($c, $max);
+    }
     return;
 }
 

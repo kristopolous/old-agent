@@ -134,7 +134,9 @@ sub _value {
     if (substr($$t, $$p, 4) eq 'null')  { $$p += 4; return (undef, undef) }
 
     if ($c =~ /[-0-9]/) {
-        if (substr($$t, $$p) =~ /^(-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)/) {
+        # bounded peek: a number cannot exceed this, and copying the whole
+        # remaining tail here would balloon memory on big payloads
+        if (substr($$t, $$p, 64) =~ /^(-?(?:0|[1-9][0-9]*)(?:\.[0-9]+)?(?:[eE][-+]?[0-9]+)?)/) {
             my $n = $1;
             $$p += length($n);
             return ($n + 0, undef);
@@ -194,17 +196,28 @@ sub _array {
 my %ESC = ('"' => '"', '\\' => '\\', '/' => '/', 'b' => "\x08",
            'f' => "\x0c", 'n' => "\n", 'r' => "\r", 't' => "\t");
 
+# Chunked, not per-character: index() to the next quote or backslash, then
+# copy the whole run with one substr.  The per-byte loop here used to be the
+# biggest memory amplifier in the decoder (O(n) temporaries plus repeated
+# realloc/copy of the growing result on every single byte).
 sub _string {
     my ($t, $p, $len) = @_;
     $$p++;    # opening quote
     my $out = '';
     while (1) {
         return (undef, 'unterminated string') if $$p >= $$len;
-        my $c = substr($$t, $$p, 1);
-        if ($c eq '"') { $$p++; return ($out, undef) }
-        if ($c eq "\\") {
-            $$p++;
-            return (undef, 'bad escape') if $$p >= $$len;
+        my $q = index($$t, '"', $$p);
+        my $b = index($$t, '\\', $$p);
+        if ($q >= 0 && ($b < 0 || $q < $b)) {
+            $out .= substr($$t, $$p, $q - $$p);
+            $$p = $q + 1;
+            return ($out, undef);
+        }
+        return (undef, 'unterminated string') if $b < 0;
+        $out .= substr($$t, $$p, $b - $$p) if $b > $$p;
+        $$p = $b + 1;    # past the backslash
+        return (undef, 'bad escape') if $$p >= $$len;
+        {
             my $e = substr($$t, $$p, 1);
             if ($e eq 'u') {
                 my $hex = substr($$t, $$p + 1, 4);
@@ -230,8 +243,6 @@ sub _string {
             $$p++;
             next;
         }
-        $out .= $c;
-        $$p++;
     }
 }
 
@@ -304,9 +315,17 @@ sub decode_lenient {
 sub parse_ndjson {
     my ($text) = @_;
     return (undef, 'empty input') unless defined $text && length $text;
-    my @lines = split(/\n+/, $text, -1);
+    # walk the body one line at a time instead of split()-ing the whole
+    # thing: with a multi-megabyte NDJSON body, split() keeps every line
+    # alive at once, a full second copy of the response.
     my ($last, $content, $count) = (undef, '', 0);
-    for my $line (@lines) {
+    my $len = length $text;
+    my $i = 0;
+    while ($i < $len) {
+        my $nl = index($text, "\n", $i);
+        my $line = $nl < 0 ? substr($text, $i)
+                            : substr($text, $i, $nl - $i);
+        $i = $nl < 0 ? $len : $nl + 1;
         next if $line =~ /^\s*$/;
         next unless $line =~ /^\s*[\{\[]/;
         my ($o, $e) = decode_lenient($line);
