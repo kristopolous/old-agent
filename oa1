@@ -43,9 +43,13 @@ my %cfg = (
 );
 my @hist;                    # { role => ..., content => ... }
 sub set_cfg { $cfg{$_[0]} = $_[1] }      # for the tests
+
+# `curl <url> | perl` reads the whole program from stdin, so stdin is at EOF
+# by the time the session starts: read the keyboard from /dev/tty instead.
+my $have_tty = 0;
+if (!-t STDIN) { if (open(TTY, "/dev/tty")) { $have_tty = 1 } }
 my $cmd_pid    = 0;          # the bash child, for the timeout handler
 my $cmd_killed = 0;
-my $bash_dir   = '';         # the model's shell is one session: remembered cwd
 
 # ------------------------------------------------------------------ json --
 # encode: a reference to a scalar is emitted raw (\"1", \"true", \"null").
@@ -722,6 +726,8 @@ sub cmd_timeout {
     kill('TERM', $cmd_pid) if $cmd_pid;
 }
 
+my $bash_dir = '';   # the model's shell is one session: remembered cwd
+
 sub tool_bash {
     my ($args) = @_;
     my $cmd = $args->{cmd};
@@ -773,9 +779,9 @@ sub approve {
     my ($cmd) = @_;
     return 'yes' if $cfg{approve} eq 'auto';
     return 'bash is switched off (/approve ask to turn it on)' if $cfg{approve} eq 'off';
-    return 'no terminal to ask for approval on; run with -y to allow commands' unless -t STDIN;
+    return 'no terminal to ask for approval on; run with -y to allow commands' unless -t STDIN || $have_tty;
     print "\n  run: $cmd\n  allow? [y]es / [n]o / [a]lways: ";
-    my $ans = <STDIN>;
+    my $ans = $have_tty ? <TTY> : <STDIN>;
     print "\n";
     return 'the human declined to run this command' unless defined $ans;
     $ans =~ s/^\s+//;
@@ -1119,7 +1125,7 @@ sub repl {
     my ($line, $cmd, $arg);
     while (1) {
         print "> ";
-        $line = <STDIN>;
+        $line = $have_tty ? <TTY> : <STDIN>;
         last unless defined $line;
         chomp $line;
         $line =~ s/^\s+//;
