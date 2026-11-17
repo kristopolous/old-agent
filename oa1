@@ -45,6 +45,7 @@ my @hist;                    # { role => ..., content => ... }
 sub set_cfg { $cfg{$_[0]} = $_[1] }      # for the tests
 my $cmd_pid    = 0;          # the bash child, for the timeout handler
 my $cmd_killed = 0;
+my $bash_dir   = '';         # the model's shell is one session: remembered cwd
 
 # ------------------------------------------------------------------ json --
 # encode: a reference to a scalar is emitted raw (\"1", \"true", \"null").
@@ -735,7 +736,17 @@ sub tool_bash {
     local *CM;
     $cmd_killed = 0;
     local $SIG{ALRM} = 'cmd_timeout';
-    $cmd_pid = open(CM, "($cmd) 2>&1 |");
+    # every bash call is one shell session: start where the last one ended,
+    # write the ending cwd back, and let the next call resume from it.
+    my $state = "/tmp/oa1-pwd-$$";
+    my $pre = '';
+    if (length $bash_dir) {
+        my $q = $bash_dir;
+        $q =~ s/'/'\\''/g;
+        $pre = "cd '$q' 2>/dev/null; ";
+    }
+    my $line = $pre . "{ $cmd ; __oa_st=\$? ; pwd > \"$state\" 2>/dev/null ; exit \$__oa_st ; } 2>&1";
+    $cmd_pid = open(CM, "$line |");
     return { ok => 0, output => "cannot run: $!" } unless $cmd_pid;
     alarm($to);
     my $out = '';
@@ -745,6 +756,9 @@ sub tool_bash {
     close CM;
     my $st = $?;
     $cmd_pid = 0;
+    local *PW;
+    if (open(PW, "<$state")) { my $dl = <PW>; close PW; if (defined $dl) { $dl =~ s/\s+$//; $bash_dir = $dl if length $dl } }
+    unlink $state;
     $out =~ s/\s+$//;
     $out = '(no output)' unless length $out;
     my $note = '';
