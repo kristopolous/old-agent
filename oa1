@@ -1001,10 +1001,11 @@ sub show_result {
         $what .= " " . arg_path($args);
     }
     print "  [$what] ", ($r->{ok} ? 'ok' : 'failed'), "\n";
-    # the whole result, nothing cut (the tool already clips it for the model)
+    # the whole result, nothing cut (the tool already clips it for the model);
+    # two spaces per line so it is visibly the machine's output
     my @l = split(/\n/, $r->{output});
     my $i;
-    for $i (0 .. $#l) { print "    ", fold($l[$i]), "\n" }
+    for $i (0 .. $#l) { print "  ", fold($l[$i]), "\n" }
 }
 
 # --------------------------------------------------------------- config --
