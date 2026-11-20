@@ -1076,11 +1076,13 @@ sub save_rc {
 sub show_config {
     my $k;
     for $k ('provider', 'base_url', 'model', 'approve', 'tools', 'turns', 'timeout', 'thinking', 'ascii') {
-        printf("  %-9s %s\n", $k, $cfg{$k});
+        my $v = $cfg{$k};
+        $v = ($v =~ /^(?:0|off|no)$/i) ? 'off' : 'on' if $k eq 'tools';
+        printf("  %-9s = %s\n", $k, ((defined $v && length $v) ? $v : '(unset)'));
     }
-    print "  api_key   ", (length $cfg{api_key} ? '(set)' : '(none)'), "\n";
-    print "  rc        ", ($cfg{noconfig} ? '(ignored)' : rc_path()), "\n";
-    print "  perl      $] on $Config::Config{osname}\n";
+    print "  api_key   = ", (length $cfg{api_key} ? '(set)' : '(none)'), "\n";
+    print "  rc        = ", ($cfg{noconfig} ? '(ignored)' : rc_path()), "\n";
+    print "  perl      = $] on $Config::Config{osname}\n";
 }
 
 # ----------------------------------------------------------------- repl --
@@ -1094,12 +1096,13 @@ usage: oa1 [flags] [command] [text]
   do TEXT       one task, tools on
   models        list what the endpoint serves
   doctor        the settings, this perl, and whether the endpoint answers
-  config        show the settings in use
+  config        show the settings in use (the same list /help ends with)
   help, version
 
 flags
   --provider P     ollama (default, native /api/chat) | openai (/v1/chat/completions)
-  --base-url URL   http://host:port (http only)
+  --base-url URL   http://host:port, or https://host when curl or wget
+                   is on the box to carry the TLS
   --model NAME     model id
   --key KEY        api key, if the endpoint wants one
   --turns N        max tool round trips per task (default 12)

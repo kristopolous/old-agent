@@ -8,6 +8,8 @@ use FindBin;
 use lib "$FindBin::Bin/../lib";
 use OldAgent::Util ();
 use IO::Socket::INET;
+use File::Spec ();
+use File::Copy ();
 
 my $oa1 = "$FindBin::Bin/../oa1";
 plan skip_all => 'oa1 not found' unless -f $oa1;
@@ -175,8 +177,22 @@ is($out2, "`hostname` tells you - Hello! I am a tiny agent.\n", 'ask -q --ascii:
 my $out3 = `perl $oa1 --no-config --base-url http://127.0.0.1:1 --model fake --timeout 5 ask hi 2>&1`;
 isnt($? >> 8, 0, 'unreachable endpoint: non-zero exit');
 like($out3, qr/error: connect to 127\.0\.0\.1:1/, 'unreachable endpoint: says so');
-my $out4 = `perl $oa1 --no-config --base-url https://example.invalid --model fake ask hi 2>&1`;
-like($out4, qr/http only/, 'https: refused with a pointer, not a hang');
+
+# https is no longer refused up front: oa1 borrows a curl or wget when one
+# exists (opportunistic TLS), and balks with a pointer to the fix (oa-proxy,
+# or a local http endpoint) only when no TLS tool is on the box. to test the
+# balk deterministically, put a perl on a PATH that has neither curl nor wget.
+my $perlbin = `$^X -V:installbin 2>/dev/null | sed -n 's/^installbin: //p'`;
+chomp $perlbin;
+my $pbin = File::Spec->catdir($dir, 'nobin');
+mkdir $pbin;
+my $pl = File::Spec->catfile($pbin, 'perl');
+{ my $tg = File::Spec->catfile($perlbin, 'perl');
+  my ($r, $e) = File::Copy::copy($tg, $pl);
+  if (!$r) { symlink($tg, $pl) or do { plan_skip_all("cannot stage a perl for the https-balk test: $e"); }; } }
+my $out4 = `PATH=$pbin $^X $oa1 --no-config --base-url https://example.invalid --model fake ask hi 2>&1`;
+like($out4, qr/no TLS in this perl, and no curl or wget/, 'https with no TLS tool: balks with a pointer, not a hang');
+like($out4, qr/oa-proxy|http endpoint/, 'https balk: points at the fix');
 
 # --- 6. oa hands over to oa1 on a perl that cannot compile the tree ------
 {
