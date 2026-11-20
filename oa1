@@ -8,8 +8,9 @@
 # it speaks the same tool protocol as oa (```tool blocks in, ```result
 # blocks back), reads the same ~/.oldagentrc, and talks to ollama's native
 # /api/chat (streaming) or an OpenAI-compatible /v1/chat/completions over
-# a raw socket. http only: a box this old has no TLS anyway; point it at
-# oa-proxy or a local model.
+# a raw socket. https is tried through a curl or a wget on the box when
+# there is one (this perl has no TLS); with neither, point it at oa-proxy
+# or a local model.
 #
 #   oa1                      interactive, tools on
 #   oa1 ask "text"           one question, no tools
@@ -221,13 +222,123 @@ sub utf8_bytes {
 # nor keeps the connection). with a line callback the body is handed over
 # line by line as it arrives (ollama streams NDJSON that way); without
 # one the whole body comes back. returns (status, body, error).
+#
+# https: this perl has no TLS, but a curl or a wget on the box almost
+# always does, so borrow theirs (https_req below) rather than refusing the
+# url. with neither program here, and no TLS, there is no way: that gets
+# said plainly, with the fix (oa-proxy, or a local http endpoint).
 my $http_timed_out = 0;
 sub http_timeout { $http_timed_out = 1; die "timeout\n" }
 
+# one shell word, single-quoted (the same trick the bash tool uses)
+sub shq {
+    my ($s) = @_;
+    $s =~ s/'/'\\''/g;
+    return "'$s'";
+}
+
+# the TLS we can borrow, found once: curl | wget | none
+my $https_kind = '';
+sub https_kind {
+    return $https_kind if length $https_kind;
+    if (length in_path('curl'))    { $https_kind = 'curl' }
+    elsif (length in_path('wget')) { $https_kind = 'wget' }
+    else                           { $https_kind = 'none' }
+    return $https_kind;
+}
+
+# the https path: the transcript goes through a temp file (argv would put
+# it in ps for every user on the box), the key through a curl config file,
+# the answer through a temp file too, so the status code curl prints can
+# be read on its own. no streaming: curl writes the body to a file, so the
+# callback sees the lines when the call is over.
+sub https_req {
+    my ($method, $url, $body, $cb) = @_;
+    my $kind = https_kind();
+    if ($kind eq 'none') {
+        return (0, '', "https to $url: no TLS in this perl, and no curl or wget on this box to borrow. run oa-proxy on a box that has TLS (oa-proxy.md), or point --base-url at a local http endpoint (http://127.0.0.1:11434)");
+    }
+    my ($bf, $cf, $of) = ("/tmp/oa1-$$-body", "/tmp/oa1-$$-conf", "/tmp/oa1-$$-resp");
+    local *T;
+    if (defined $body) {
+        open(T, ">$bf") || return (0, '', "cannot write $bf: $!");
+        chmod(0600, $bf);
+        print T $body;
+        close T;
+    }
+    my $cmd = '';
+    if ($kind eq 'curl') {
+        my @c = ('silent', 'show-error');
+        push @c, 'max-time = ' . $cfg{timeout} if $cfg{timeout} > 0;
+        push @c, 'header = "Content-Type: application/json"';
+        if (length $cfg{api_key}) {
+            my $k = $cfg{api_key};
+            $k =~ s/([\\"])/\\$1/g;
+            push @c, 'header = "Authorization: Bearer ' . $k . '"';
+        }
+        open(T, ">$cf") || do { unlink $bf; return (0, '', "cannot write $cf: $!") };
+        chmod(0600, $cf);
+        print T join("\n", @c), "\n";
+        close T;
+        $cmd = 'curl -K ' . shq($cf) . ' -X ' . $method;
+        $cmd .= ' --data-binary ' . shq('@' . $bf) if defined $body;
+        $cmd .= ' -o ' . shq($of) . ' -w ' . shq('%{http_code}') . ' ' . shq($url);
+    } else {
+        # wget has no config file to hide a key in, so this one goes by argv
+        $cmd = 'wget -q -O ' . shq($of);
+        $cmd .= ' -T ' . $cfg{timeout} if $cfg{timeout} > 0;
+        $cmd .= ' --header=' . shq('Content-Type: application/json');
+        $cmd .= ' --header=' . shq('Authorization: Bearer ' . $cfg{api_key}) if length $cfg{api_key};
+        $cmd .= ' --post-file=' . shq($bf) if defined $body;
+        $cmd .= ' ' . shq($url);
+    }
+
+    my ($status, $rc, $out, $ran, $err) = (0, 0, '', '', '');
+    $http_timed_out = 0;
+    local $SIG{ALRM} = 'http_timeout';
+    local $SIG{PIPE} = 'IGNORE';
+    alarm($cfg{timeout} > 0 ? $cfg{timeout} + 5 : 0);
+    eval {
+        my $pid = open(CH, "$cmd |");
+        die "cannot run $kind: $!\n" unless $pid;
+        while (defined(my $w = <CH>)) { $ran .= $w }
+        close CH;
+        $rc = ($? >> 8);
+    };
+    alarm(0);
+    if ($@) { $err = $@; chomp $err }
+    if ($ran =~ /(\d\d\d)/) { $status = $1 }
+    local *RS;
+    if (open(RS, "<$of")) { $out = do { local $/; <RS> }; close RS }
+    $out = '' unless defined $out;
+    unlink $bf, $cf, $of;
+
+    if ($http_timed_out) { return (0, '', "$kind at $url gave no answer within $cfg{timeout}s") }
+    return (0, '', $err) if length $err;
+    if ($kind eq 'wget' && $rc != 0) {
+        my $why = ($rc == 8) ? 'the server answered an error'
+                : ($rc == 6) ? 'the server refused the key'
+                : 'network or dns failure';
+        my $peek = $out; $peek =~ s/\s+/ /g;
+        return (0, '', "wget: $why (exit $rc)" . (length $peek ? ': ' . substr($peek, 0, 200) : ''));
+    }
+    if ($status == 0 && $rc != 0) {
+        # the tool never got a response, so there is no status to report
+        my $peek = $out; $peek =~ s/\s+/ /g;
+        return (0, '', "$kind could not finish the request (exit $rc)" . (length $peek ? ': ' . substr($peek, 0, 200) : ''));
+    }
+    $status = 200 if $status == 0;
+    if ($cb) {
+        my @ls = split(/\n/, $out);
+        my $l;
+        for $l (@ls) { next unless length $l; &$cb($l) }
+    }
+    return ($status, $out, '');
+}
+
 sub http_req {
     my ($method, $url, $body, $cb) = @_;
-    return (0, '', "oa1 speaks http only, not $1 (use oa-proxy or a local model): $url")
-        if $url =~ m!^(https)://!i;
+    return https_req($method, $url, $body, $cb) if $url =~ m!^https://!i;
     return (0, '', "bad url: $url") unless $url =~ m!^http://([^/:]+)(?::(\d+))?(/.*)?$!i;
     my ($host, $port, $path) = ($1, $2, $3);
     $port = 80 unless defined $port && length $port;
@@ -747,9 +858,7 @@ sub tool_bash {
     my $state = "/tmp/oa1-pwd-$$";
     my $pre = '';
     if (length $bash_dir) {
-        my $q = $bash_dir;
-        $q =~ s/'/'\\''/g;
-        $pre = "cd '$q' 2>/dev/null; ";
+        $pre = "cd " . shq($bash_dir) . " 2>/dev/null; ";
     }
     my $line = $pre . "{ $cmd ; __oa_st=\$? ; pwd > \"$state\" 2>/dev/null ; exit \$__oa_st ; } 2>&1";
     $cmd_pid = open(CM, "$line |");
@@ -1120,6 +1229,10 @@ flags
 in the session: /model NAME, /base URL, /provider P, /approve ask|auto|off,
 /tools on|off, /clear, /history, /config, /models, /help, /quit
 HELP
+
+    # the same variables, as this session has them right now
+    print "\nsettings in use:\n";
+    show_config();
 }
 
 sub repl {
@@ -1170,6 +1283,10 @@ sub cmd_doctor {
     print "  shell     ", (in_path('sh') ? in_path('sh') : '(no sh: the bash tool cannot run)'), "\n";
     print "  uname     ", (in_path('uname') || in_path('hostinfo') || '(neither uname nor hostinfo)'), "\n";
     print "  tty       ", (-t STDIN ? 'yes' : 'no (bash approval needs one; -y to skip it)'), "\n";
+    my $tls = https_kind();
+    print "  https     ", ($tls eq 'none'
+        ? 'no TLS in this perl and no curl or wget here: http only (oa-proxy bridges it)'
+        : "borrowed from $tls at " . in_path($tls) . ' (the reply arrives whole, not streamed)'), "\n";
     my ($names, $err) = list_models();
     if ($err) { print "  endpoint  $cfg{base_url}: $err\n"; return 1 }
     print "  endpoint  $cfg{base_url}: ", scalar(@$names), " model(s)",
