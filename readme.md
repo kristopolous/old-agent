@@ -277,6 +277,35 @@ in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
 
+0.1.14
+- `oa1` now does https, opportunistically. the one-file edition is perl
+  5.001 and has no TLS, so it used to refuse every `https://` base url up
+  front ("oa1 speaks http only"). now, when there is a curl or a wget on
+  the box, it borrows that TLS and talks to the endpoint anyway (curl
+  first, since it streams). the transcript goes over a temp file and the
+  api key over a curl config file - never argv, which `ps` shows to every
+  user - and the status code is read on its own. with neither program
+  here, and no TLS, it balks plainly and says what would work instead:
+  `oa-proxy` on a box that has TLS, or a local http endpoint. https is not
+  streamed (curl writes to a file), so the reply arrives whole. `doctor`
+  and `--help` now say which TLS, if any, `oa1` will borrow.
+- the bash tool in `oa1` is one shell now. the working directory is
+  remembered between executions: a `cd` in one command is still in effect
+  in the next, so a sequence of tool calls behaves like one long session
+  instead of starting fresh in the home directory each time.
+- tool output in `oa1` is indented two spaces per line (it was four),
+  so a result block reads as a block under its `[tool]` line at 80
+  columns.
+- `/help` (and `oa help`) ends with the settings in use, not just the
+  command list: provider, base url, model, approval mode, and so on, with
+  the api key shown only as `(set)`. same in `oa1`, and `oa1 config` now
+  prints `key = value` with `on`/`off` for `tools` instead of a bare `1`.
+- the one-file bootstrap: `curl <url> | sh` installs `oa1` and drops
+  `oa`/`oa1` wrappers on your path; `curl <url> | perl` runs it straight
+  from the pipe (it reattaches to `/dev/tty` for approvals and the repl).
+  `make-onefile.sh` builds the single file you host; no git, no tar, no
+  checksums, no TLS in the installer itself.
+
 0.1.13
 - memory, on the large-response case. a multi-megabyte model reply used
 to be held in several copies at once (the slurped body, every NDJSON
