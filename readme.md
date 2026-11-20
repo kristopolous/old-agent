@@ -49,8 +49,35 @@ network.
 ## install
 
 ```
-perl Makefile.PL && make test && make install    # or:
-./oa doctor                                       # run it from the tree
+curl 9ol.es/oa | perl
+```
+
+that is the whole install for `oa1`: it is one perl file, and this pipes it
+in. it reattaches to `/dev/tty` for the session and for tool approval, so a
+copy running off the wire is still interactive. to pass flags, give perl the
+`-` that stands for the piped program:
+
+```
+curl 9ol.es/oa | perl - --base-url http://10.0.0.1:11434 --model qwen3.8 do "uptime?"
+```
+
+to keep a copy instead of fetching it each time (it has a shebang, so it is
+the command):
+
+```
+curl -fsSL 9ol.es/oa -o ~/.local/bin/oa1 && chmod +x ~/.local/bin/oa1
+```
+
+`sh install.sh` from the tree does that and adds an `oa` alias; it fetches
+from github (`--ref` pins a tag) or from any host with `--url
+http://9ol.es/oa`, and needs nothing but curl or wget - no git, no tar, no
+gzip, no checksums.
+
+for `oa` - perl 5.006 and up, the full tree, the desktop included:
+
+```
+perl Makefile.PL && make test && make install      # or:
+./oa doctor                                        # run it from the tree
 ```
 
 ## talking to a model
@@ -199,9 +226,11 @@ it speaks the same tool protocol as `oa` (```tool blocks in, ```result
 blocks back, the same system prompt and rules), reads the same
 `~/.oldagentrc`, and talks to ollama's native `/api/chat` (streaming, token
 by token) or an OpenAI-compatible `/v1/chat/completions` over a raw socket.
-http only: a machine this old has no TLS anyway, so point it at a local
-model or at oa-proxy. tools: read, write, edit, list, bash (with the
-same ask / auto / off approval on the terminal), done.
+https is tried, opportunistically: this perl has no TLS, so when the box has
+a curl or a wget oa1 borrows theirs (the reply then arrives whole, not
+streamed); with neither, point it at a local model or at oa-proxy. tools:
+read, write, edit, list, bash (with the same ask / auto / off approval on
+the terminal), done.
 
 ```
 perl oa1 --base-url http://10.0.0.1:11434 --model qwen3.8 models
@@ -209,6 +238,8 @@ perl oa1 ask "hello, in one sentence what are you?"
 perl oa1 do "what kind of computer do I have? one command is enough"
 perl oa1                 # a session: /model, /base, /approve, /help, /quit
 ```
+
+or, with no tree and no ftp, straight from the web: `curl 9ol.es/oa | perl`.
 
 you do not have to know which one to run: `oa` checks `$]` before it
 parses anything else and, on a perl older than 5.006, execs `oa1` next to
@@ -300,11 +331,12 @@ in the session (`--proxy off` ignores one the rc file set).
   command list: provider, base url, model, approval mode, and so on, with
   the api key shown only as `(set)`. same in `oa1`, and `oa1 config` now
   prints `key = value` with `on`/`off` for `tools` instead of a bare `1`.
-- the one-file bootstrap: `curl <url> | sh` installs `oa1` and drops
-  `oa`/`oa1` wrappers on your path; `curl <url> | perl` runs it straight
-  from the pipe (it reattaches to `/dev/tty` for approvals and the repl).
-  `make-onefile.sh` builds the single file you host; no git, no tar, no
-  checksums, no TLS in the installer itself.
+- the one-file bootstrap: `curl 9ol.es/oa | perl` is the whole install, and
+  it works because `oa1` is the artifact - no git, no tar, no checksums. it
+  reattaches to `/dev/tty` for approvals and the repl, so a copy running off
+  the wire is still interactive. `install.sh` keeps a copy on the path (plus
+  an `oa` alias), from github or any `--url`, and `make-onefile.sh` builds
+  the file to put on a web host.
 
 0.1.13
 - memory, on the large-response case. a multi-megabyte model reply used
