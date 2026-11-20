@@ -249,7 +249,12 @@ sub cmd_tools {
     return 0;
 }
 
-sub cmd_help { print _usage(); return 0 }
+sub cmd_help {
+    my (%a) = @_;
+    print _usage();
+    print _settings_text($a{config}) if $a{config};
+    return 0;
+}
 sub cmd_version { print "oldagent " . OldAgent::version() . " (perl $])\n"; return 0 }
 
 sub cmd_desktop {
@@ -354,7 +359,7 @@ sub repl_command {
     my @r     = split(/\s+/, $rest);
 
     if ($c eq 'quit' || $c eq 'exit' || $c eq 'q') { return 'quit' }
-    if ($c eq 'help' || $c eq '?') { print _repl_help(); return }
+    if ($c eq 'help' || $c eq '?') { print _repl_help(); print _settings_text($cfg); return }
     if ($c eq 'clear')             { $agent->reset; print "(history cleared)\n"; return }
     if ($c eq 'undo')              { my $n = $agent->undo; print "(dropped $n message(s))\n"; return }
     if ($c eq 'history') {
@@ -682,6 +687,25 @@ sub _read_stdin {
     return defined $in ? $in : '';
 }
 
+# the variables /help lists, with the values this session is using, as
+# "key = value" lines: /help and `oa help` end with these so what is on
+# the screen is what is in force, not the defaults.
+sub _settings_text {
+    my ($cfg) = @_;
+    my $out = "\nsettings in use:\n";
+    for my $k (qw(provider base_url model api_key approve tools max_turns
+                  timeout thinking root proxy)) {
+        my $v = $cfg->get($k);
+        $v = '' unless defined $v;
+        if    ($k eq 'api_key') { $v = length($v) ? '(set)' : '(unset)' }
+        elsif ($k eq 'tools')   { $v = ($v eq '0' || $v =~ /^(?:off|no)$/i) ? 'off' : 'on' }
+        $out .= sprintf("  %-11s = %s\n", $k, length($v) ? $v : '(unset)');
+    }
+    my @f = $cfg->files;
+    $out .= sprintf("  %-11s = %s\n", 'config', (@f ? join(', ', @f) : '(none, defaults only)'));
+    return $out;
+}
+
 sub _usage {
     return <<'EOT';
 oldagent - a tiny agent for old perl and older machines
@@ -728,7 +752,7 @@ EOT
 
 sub _repl_help {
     return <<'EOT';
-  /help            this
+  /help            this, then the settings in use
   /quit            leave (also /q, /exit)
   /clear           forget the conversation
   /undo            drop the last exchange
