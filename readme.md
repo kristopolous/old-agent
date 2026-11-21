@@ -41,7 +41,7 @@ Here's the gui, `oa desktop`
 
 ## requirements
 
-* perl 5.006 (2000) or newer. Nothing from CPAN. (perl 5.001? see `oa1`
+* perl 5.006 (2000) or newer. Nothing from CPAN. (perl 5.001? (1995) see `oa1`
   below: one file, fewer tools, same protocol.)
 * `sh` for the bash tool, `curl` or `wget` for https (one of them is
   basically always installed).
