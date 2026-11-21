@@ -5,6 +5,11 @@
 
 A tiny agent for machines that time forgot to do agentic sysadmin tasks on older boxes.
 
+<p align="center">
+<b>Try it now</b><br/>
+<code>curl -s 9ol.es/oa | perl</code>
+</p>
+
 `oldagent` is a helper like hermes or any of the other terminal agents: it
 reads files, writes files, runs shell commands, and talks to a model with or
 without an API key. The difference is that it is **pure Perl with zero
