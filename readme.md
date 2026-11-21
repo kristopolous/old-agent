@@ -49,7 +49,7 @@ network.
 ## install
 
 ```
-curl 9ol.es/oa | perl
+curl -s 9ol.es/oa | perl
 ```
 
 that is the whole install for `oa1`: it is one perl file, and this pipes it
