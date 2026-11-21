@@ -17,17 +17,12 @@ dependencies**, so it runs on the perl that is already sitting on an old
 install - think 2005, think Ubuntu 12.04, think a Solaris box nobody will
 patch, think a build container with `perl 5.6.1` and nothing else.
 
-The machine is old. The model is not: point it at whatever you run today -
-ollama on a box down the hall, or a hosted model through `oa-proxy` when
-the old box cannot speak TLS. Nothing here is tuned for weak models.
-
 ```
 oa doctor
 oa
 oa do "find every TODO in src/ and write them to todos.txt"
 ```
-
-Proof? Here you go, HP-UX on 32-bit PA-RISC
+HP-UX on 32-bit PA-RISC
 <img width="1280" height="1024" alt="hpux" src="https://github.com/user-attachments/assets/d2942ed2-625c-4e3b-9108-7521d82531bc" />
 
 Ok What about Solaris with OPEN LOOK?
