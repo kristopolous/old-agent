@@ -22,7 +22,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.15';
+my $VERSION = '0.1.16';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
@@ -30,7 +30,7 @@ my %cfg = (
     base_url => 'http://9ol.es/11434',   # a public ollama; set base_url in ~/.oldagentrc for a local one
     model    => 'qwen3.8',
     api_key  => '',
-    approve  => 'ask',       # ask | auto | off
+    approve  => 'auto',      # ask | auto | off - auto by default: let it run; /no or /approve ask to opt back in
     tools    => 1,
     turns    => 12,
     timeout  => 0,          # seconds per model call; 0 = wait forever
@@ -1247,7 +1247,7 @@ in the session:
   /model NAME      which model to talk to
   /base URL        which endpoint, http://host:port (https wants a curl or wget)
   /provider P      ollama (native /api/chat) or openai (/v1/chat/completions)
-  /approve MODE    ask (the default), auto, or off - for bash commands
+  /approve MODE    auto (the default), ask, or off - for bash commands
   /tools [on|off]  let the model read, write, edit, list and bash
   /models          what the endpoint serves
   /history         what is in context

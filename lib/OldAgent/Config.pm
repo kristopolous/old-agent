@@ -19,7 +19,7 @@ my %DEFAULT = (
     timeout      => '0',          # seconds per model call; 0 = wait forever
     http         => 'auto',
     tools        => '1',
-    approve      => 'ask',       # ask | auto | off
+    approve      => 'auto',      # ask | auto | off - auto by default: let it run; /no or /approve ask to opt back in
     max_turns    => '12',
     no_tool_max  => '3',          # tool-less rounds before we stop nudging
     max_output   => '4000',

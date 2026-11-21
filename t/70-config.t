@@ -36,7 +36,7 @@ OldAgent::Util::spew($file, join("\n",
 ));
 my $c = OldAgent::Config->load(no_files => 1);
 is($c->get('provider'), 'openai', 'default provider');
-is($c->get('approve'), 'ask', 'default approval');
+is($c->get('approve'), 'auto', 'default approval lets it run (auto)');
 
 $c = OldAgent::Config->load(no_files => 1);
 $c->load_file($file);

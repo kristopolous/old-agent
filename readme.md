@@ -113,7 +113,7 @@ provider = openai
 base_url = https://api.openai.com/v1
 model    = gpt-4o-mini
 api_key  = put-your-key-here      # or OPENAI_API_KEY, never commit this
-approve  = ask                    # ask | auto
+approve  = auto                   # ask | auto | off - auto is the default; set ask (or /no) to prompt first
 root     = /srv/build             # refuse writes outside this
 http     = auto                   # curl | wget | httptiny | lwp | socket
 proxy    = 10.0.0.126:8470         # oa-proxy on a modern box, or --proxy
@@ -321,6 +321,14 @@ On the old box, `oa --proxy host:port` does what `/proxy host:port` does
 in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
+
+0.1.16
+- bash approval defaults to `auto` now: a bare agent runs bash commands
+  without prompting, to remove the friction on a box you are already
+  talking to. `/no` (or `approve = ask` in the rc; `oa` also takes
+  `--ask`) turns the prompt back on, and `/approve off` disables bash
+  entirely. `/yes` or `/no` in a session remembers the choice in the
+  config, so you set it once.
 
 0.1.15
 - `oa1 oa [args]` runs the full, multi-file `oa` when this perl can compile
