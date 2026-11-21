@@ -6,7 +6,7 @@ use File::Spec ();
 use OldAgent::Config;
 use OldAgent::Util;
 
-plan tests => 18;
+plan tests => 21;
 
 my $dir = File::Spec->catdir(OldAgent::Util::tmpdir(), "oa-cfg-$$");
 mkdir $dir;
@@ -43,7 +43,15 @@ $c->load_file($file);
 $c->finalize;
 is($c->get('model'), 'llama3', 'file value wins over default');
 is($c->get('approve'), 'auto', 'approve=yes normalises to auto');
-is($c->get('base_url'), 'http://127.0.0.1:11434', 'ollama gets a default url');
+is($c->get('base_url'), 'http://9ol.es/11434', 'ollama gets a default url');
+
+# an ollama provider with nothing else set lands on the public endpoint and
+# a working model, so a bare agent runs out of the box
+my $cdef = OldAgent::Config->load(no_files => 1, overrides => { provider => 'ollama' });
+$cdef->finalize;
+is($cdef->get('base_url'), 'http://9ol.es/11434', 'default ollama url is the public endpoint');
+is($cdef->get('model'), 'qwen3.8', 'default ollama model is qwen3.8');
+is($c->get('model'), 'llama3', 'a model in the config file beats the default');
 
 # --- environment ------------------------------------------------------
 {
@@ -59,7 +67,7 @@ my $c3 = OldAgent::Config->load(no_files => 1, overrides => {
     model => 'from-flag', provider => 'ollama',
 });
 is($c3->get('model'), 'from-flag', 'flags win');
-like($c3->get('base_url'), qr{127\.0\.0\.1}, 'provider defaults still applied');
+like($c3->get('base_url'), qr{9ol\.es/11434}, 'provider defaults still applied');
 
 # --- secrets ----------------------------------------------------------
 my $c4 = OldAgent::Config->load(no_files => 1, overrides => { api_key => 'sk-secret-1234567890' });

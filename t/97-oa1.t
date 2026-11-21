@@ -251,4 +251,28 @@ ok($head !~ /^use /m || index($head, "BEGIN {\n    if ($] < 5.006") < index($hea
     like($out, qr{/model NAME\s.*\n\s*/base URL\s}m, 'session /help: one command per line');
 }
 
+# --- 12. `oa1 oa`: the full agent, when this perl can run the tree --------
+{
+    my $oa = "$FindBin::Bin/../oa";
+    if (-f $oa && $] >= 5.006) {
+        # everything after `oa` belongs to the full agent, so its --version
+        # must reach it (oa1 must not print its own version instead)
+        my $r = `$^X $oa1 oa --version 2>&1`;
+        like($r, qr{oldagent \d}, 'oa1 oa: delegates --version to the full agent');
+        # and it really execs the sibling, not itself
+        like($r, qr{running the full agent}, 'oa1 oa: says it is running the full agent');
+        # oa1-level flags before `oa` are still honoured (no rc read here)
+        my $r2 = `$^X $oa1 --no-config oa --version 2>&1`;
+        like($r2, qr{oldagent \d}, 'oa1 oa: honours rc flags before the subcommand');
+    } else {
+        # too old a perl, or no sibling: it says so and does not hang
+        my $r = `$^X $oa1 oa --version 2>&1`;
+        like($r, qr{oa1 oa: (this perl|no full agent)}, 'oa1 oa: explains when it cannot delegate');
+    }
+    # the hand-off guard: if the full agent is already handing back, do not
+    # exec it again (that would loop)
+    my $loop = `OA1_HANDOFF=1 $^X $oa1 oa --version 2>&1`;
+    like($loop, qr{not for this perl|the edition here}, 'oa1 oa: does not re-exec on the way back');
+}
+
 done_testing;

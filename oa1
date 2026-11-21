@@ -22,13 +22,13 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.14';
+my $VERSION = '0.1.15';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
     provider => 'ollama',
-    base_url => 'http://127.0.0.1:11434',
-    model    => '',
+    base_url => 'http://9ol.es/11434',   # a public ollama; set base_url in ~/.oldagentrc for a local one
+    model    => 'qwen3.8',
     api_key  => '',
     approve  => 'ask',       # ask | auto | off
     tools    => 1,
@@ -1206,6 +1206,8 @@ usage: oa1 [flags] [command] [text]
   models        list what the endpoint serves
   doctor        the settings, this perl, and whether the endpoint answers
   config        show the settings in use (the same list /help ends with)
+  oa [args]     the full multi-file agent, when this perl can run it (5.006+);
+                oa1 stays the edition on a perl too old for the tree
   help, version
 
 flags
@@ -1316,6 +1318,51 @@ sub cmd_doctor {
     return 0;
 }
 
+# the full, multi-file agent (oa), when this perl can compile the tree.
+# oa1 is the one-file edition for a perl too old for that; on a modern box
+# `oa1 oa` hands over to the full thing instead of staying in the minimal one.
+sub cmd_oa {
+    my ($rest) = @_;
+    # the full agent is already handing us back (its perl is too old); running
+    # it again would loop. oa1 is the edition for this box, so stop here.
+    if ($ENV{OA1_HANDOFF}) {
+        print STDERR "oa1 oa: the full agent is not for this perl ($]); oa1 is the edition here\n";
+        return 0;
+    }
+    my $perl_ok = $] >= 5.006;
+    my $full = '';
+    # an oa next to this oa1 (the normal install layout) beats one on the path
+    my $self = $0;
+    my $t = -l $self ? readlink($self) : undef;
+    my $dir;
+    if (defined $t) {
+        $dir = $self;
+        $dir =~ s{[^/]*$}{};
+        $t = ($t =~ m{^/}) ? $t : "$dir$t";
+        $self = $t;
+    }
+    $dir = $self;
+    $dir =~ s{[^/]*$}{};
+    $dir = './' unless length $dir;
+    if (-f "$dir/oa") {
+        $full = "$dir/oa";
+    } else {
+        $full = in_path('oa');
+    }
+    if (!$perl_ok || !length $full) {
+        my $why = !$perl_ok
+            ? "this perl ($]) is too old for the full agent (needs 5.006); oa1 is the whole edition here"
+            : "no full agent (oa) next to this oa1 or on the path; oa1 is the whole edition here";
+        print STDERR "oa1 oa: $why\n";
+        return 0;
+    }
+    print STDERR "oa1 oa: running the full agent at $full\n";
+    $ENV{OA1_HANDOFF} = 1;  # if the full agent hands back to oa1, do not hand over again
+    exec($^X, $full, @$rest);
+    print STDERR "oa1 oa: could not start $full: $!\n";
+    return 1;
+}
+
 sub cmd_models {
     my ($names, $err) = list_models();
     if ($err) { print "error: $err\n"; return 1 }
@@ -1330,6 +1377,31 @@ sub main {
     my (@args, $opt, $cmd, $text);
     @args = @ARGV;
     my @rest;
+    # `oa1 oa [args...]` runs the full, multi-file agent. everything after the
+    # first `oa` belongs to it (its --version, its --model, ...), so oa1's flag
+    # parser must not eat those. oa1-level flags before `oa` are still honoured.
+    {
+        my @pass;        # the args that go to the full agent
+        my @pre;         # oa1-level tokens before `oa`
+        my $seen_oa;
+        my $tok;
+        for $tok (@args) {
+            if ($seen_oa) { push @pass, $tok; next }
+            $seen_oa = 1, next if $tok eq 'oa';
+            push @pre, $tok;
+        }
+        if ($seen_oa) {
+            # honour the rc flags that sat before `oa`, then hand over
+            my $p;
+            while (@pre) {
+                $p = shift @pre;
+                if ($p eq '--config') { $cfg{rcfile} = shift @pre; next }
+                if ($p eq '--no-config') { $cfg{noconfig} = 1; next }
+            }
+            load_rc();
+            return cmd_oa(\@pass);
+        }
+    }
     # the rc first, then flags on top of it
     while (@args) {
         $opt = shift @args;
@@ -1378,6 +1450,7 @@ sub main {
     if ($cmd eq 'config')  { show_config(); return 0 }
     if ($cmd eq 'models')  { return cmd_models() }
     if ($cmd eq 'doctor')  { return cmd_doctor() }
+
     if (!length $cfg{model} && $cmd ne 'repl') {
         print "no model set: --model NAME, or /model NAME in a session (oa1 models lists them)\n";
         return 2;

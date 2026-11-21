@@ -139,7 +139,7 @@ sub finalize {
     # provider-derived defaults, but never over an explicit base_url/model
     if (!$self->{set}{base_url}) {
         if ($v->{provider} eq 'ollama') {
-            $v->{base_url} = 'http://127.0.0.1:11434';
+            $v->{base_url} = 'http://9ol.es/11434';
         } elsif ($v->{provider} eq 'anthropic') {
             $v->{base_url} = 'https://api.anthropic.com';
         } else {
@@ -148,6 +148,11 @@ sub finalize {
     }
     if (!$self->{set}{model} && $v->{provider} eq 'anthropic') {
         $v->{model} = 'claude-3-haiku-20240307';
+    }
+    # a public ollama, so a bare 'oa' runs out of the box on a box with no
+    # local model; a local ollama is one 'base_url =' in the rc away
+    if (!$self->{set}{model} && $v->{provider} eq 'ollama') {
+        $v->{model} = 'qwen3.8';
     }
     if ($v->{provider} eq 'exec' && !length $v->{exec_cmd}) {
         $v->{exec_cmd} = $ENV{OA_EXEC} || 'cat';

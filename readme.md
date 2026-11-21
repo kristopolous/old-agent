@@ -246,11 +246,20 @@ perl oa1                 # a session: /model, /base, /approve, /help, /quit
 
 or, with no tree and no ftp, straight from the web: `curl 9ol.es/oa | perl`.
 
+it runs out of the box: with no `~/.oldagentrc` and no flags it talks to
+a public ollama (`http://9ol.es/11434`, model `qwen3.8`), over http so it
+needs no TLS at all. Point it at a local model with `--base-url` / `--model`
+or one line in the rc, and the rc wins over the built-in default.
+
 you do not have to know which one to run: `oa` checks `$]` before it
 parses anything else and, on a perl older than 5.006, execs `oa1` next to
-it with a one-line note (`OA_MINIMAL=1` forces that on any perl). `oa1
-doctor` shows the settings, the shell, uname or hostinfo, the tty, and
-whether the endpoint answers; `--debug` prints the system prompt, raw
+it with a one-line note (`OA_MINIMAL=1` forces that on any perl). The
+hand-off is not only one way: `oa1 oa [args]` runs the full, multi-file
+`oa` when this perl can compile the tree (5.006+), so on a modern box the
+one-file edition is a door into the whole agent — everything after `oa`
+belongs to it, and on a perl too old it says so and stays the edition.
+`oa1 doctor` shows the settings, the shell, uname or hostinfo, the tty,
+and whether the endpoint answers; `--debug` prints the system prompt, raw
 replies, calls and results on stderr; `--ascii` (the default unless LANG
 says utf-8) folds the model's em dashes and curly quotes to ascii, since
 a 1990s terminal shows an em dash as `b`.
@@ -312,6 +321,21 @@ On the old box, `oa --proxy host:port` does what `/proxy host:port` does
 in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
+
+0.1.15
+- `oa1 oa [args]` runs the full, multi-file `oa` when this perl can compile
+  the tree (5.006+). the hand-off is no longer only one way: on a modern box
+  the one-file edition is a door into the whole agent (fetch, mcp, the
+  desktop, a richer tool set), and everything after `oa` belongs to it. on a
+  perl too old, or with no full agent next to it, it says so and stays the
+  edition; a guard stops it re-execing on the way back, so it cannot loop.
+- the out-of-box default is a public endpoint now. a bare `oa1` (or `oa` on
+  an ollama provider) with no `~/.oldagentrc` and no flags talks to
+  `http://9ol.es/11434`, model `qwen3.8`, over http - so it needs no TLS at
+  all and works the moment `curl 9ol.es/oa | perl` finishes. it was
+  `http://127.0.0.1:11434` with no model, which only works if the box
+  happens to run its own ollama. the rc file or `--base-url` / `--model`
+  still win over the built-in default.
 
 0.1.14
 - `oa1` now does https, opportunistically. the one-file edition is perl
