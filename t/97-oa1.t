@@ -207,4 +207,48 @@ my $head = do { open(my $fh, "<", "$FindBin::Bin/../oa") or die; local $/; <$fh>
 like($head, qr/^BEGIN \{\n    if \(\$\] < 5\.006/m, 'oa: the version check is the first code in the file, before any use');
 ok($head !~ /^use /m || index($head, "BEGIN {\n    if ($] < 5.006") < index($head, "\nuse "), 'oa: no use statement precedes the check');
 
+# --- 7. /help in a session lists what a session can do -----------------
+# the complaint this guards: /help in the repl printed the whole command line
+# usage, so the first screenful was flags you could not pass from a session,
+# and the handful of commands you could pass were one squashed line. session
+# help leads with the session, and says nothing the session does not do.
+{
+    local @ARGV = ();
+    require $oa1;
+    my $h = main::repl_help();
+    like($h, qr{^in the session:\n}, 'session /help leads with the session');
+    unlike($h, qr/--base-url|--timeout|--no-config|usage: oa1/, 'session /help lists no command-line flags');
+
+    # every command it names has to be one the repl actually dispatches
+    my ($repl_src) = do { open(my $fh, '<', $oa1) or die; local $/; <$fh> };
+    my ($dispatch) = $repl_src =~ /sub repl \{(.*?)\n\}/s;
+    ok($dispatch, 'found the repl dispatcher to check against');
+    my @listed = $h =~ m{^  /(\w+)}gm;
+    cmp_ok(scalar(@listed), '>=', 8, 'session /help lists the commands one per line');
+    my @phantom;
+    my $c;
+    for $c (@listed) {
+        my $found = 0;
+        $found = 1 if index($dispatch, "\$cmd eq '$c'") >= 0;
+        $found = 1 if $c eq 'quit' && index($dispatch, 'quit|exit|q') >= 0;
+        push @phantom, $c unless $found;
+    }
+    is_deeply(\@phantom, [], 'every command the session help lists is dispatched');
+
+    # and the settings still follow it, which is what /help was asked to
+    # show. (in-process, not piped: the repl prefers /dev/tty when it can
+    # open one, so a pipe would not be read here)
+    my $out = '';
+    {
+        local *STDOUT;
+        open(STDOUT, '>', \$out) or die "stdout: $!";
+        print main::repl_help();
+        print "\nsettings in use:\n";
+        main::show_config();
+    }
+    like($out, qr{in the session:\n  /help}, 'session /help: the session list comes first');
+    like($out, qr{settings in use:\n  provider  = }, 'session /help: ends with the settings in use');
+    like($out, qr{/model NAME\s.*\n\s*/base URL\s}m, 'session /help: one command per line');
+}
+
 done_testing;

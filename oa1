@@ -1226,13 +1226,35 @@ flags
                    (default: fold unless LANG says utf-8)
   -p TEXT          same as ask TEXT
 
-in the session: /model NAME, /base URL, /provider P, /approve ask|auto|off,
-/tools on|off, /clear, /history, /config, /models, /help, /quit
+in a session, /help lists the commands a session has - one per line - and
+the settings in use.
 HELP
 
     # the same variables, as this session has them right now
     print "\nsettings in use:\n";
     show_config();
+}
+
+# what /help prints inside a session: the commands a session actually has,
+# one per line, and no command-line flags, which cannot be passed from here.
+sub repl_help {
+    return <<'HELP';
+in the session:
+  /help            this, then the settings in use
+  /quit            leave (also /q, /exit)
+  /model NAME      which model to talk to
+  /base URL        which endpoint, http://host:port (https wants a curl or wget)
+  /provider P      ollama (native /api/chat) or openai (/v1/chat/completions)
+  /approve MODE    ask (the default), auto, or off - for bash commands
+  /tools [on|off]  let the model read, write, edit, list and bash
+  /models          what the endpoint serves
+  /history         what is in context
+  /clear           forget the conversation (also /reset)
+  /config          the settings in use (the same list this ends with)
+
+anything else is a message to the model. the flags are command line only:
+`oa1 help` lists them.
+HELP
 }
 
 sub repl {
@@ -1250,7 +1272,7 @@ sub repl {
         if ($line =~ m!^/(\w+)\s*(.*)$!) {
             ($cmd, $arg) = ($1, $2);
             last if $cmd =~ /^(?:quit|exit|q)$/;
-            if    ($cmd eq 'help') { help() }
+            if    ($cmd eq 'help') { print repl_help(); print "\nsettings in use:\n"; show_config() }
             elsif ($cmd eq 'model' && length $arg)    { $cfg{model} = $arg; save_rc('model', $arg); print "model = $arg\n" }
             elsif ($cmd eq 'base' && length $arg)     { $cfg{base_url} = $arg; save_rc('base_url', $arg); print "base_url = $arg\n" }
             elsif ($cmd eq 'provider' && length $arg) { $cfg{provider} = $arg =~ /^openai/ ? 'openai' : 'ollama'; save_rc('provider', $cfg{provider}); print "provider = $cfg{provider}\n" }
