@@ -43,7 +43,88 @@ my %cfg = (
     system_extra => '',
 );
 my @hist;                    # { role => ..., content => ... }
+my $session_file = '';       # the live transcript (jsonl), appended to as it happens
+my $session_open = 0;        # it is on disk and open
+my $session_seq  = 0;        # per-process counter, so /clear rolls to a new name
 sub set_cfg { $cfg{$_[0]} = $_[1] }      # for the tests
+
+# the session is a jsonl file on disk, one {role,content} per line, appended to
+# as the conversation grows. that is the whole durability model: nothing in the
+# transcript is only in memory, so a Ctrl-C (or a crash, or the box dying)
+# loses nothing - you just tell the user where it is and let them `resume` it.
+# like llcat's "the conversation is a file": the file is the conversation.
+sub session_dir {
+    return $ENV{OA_SESSION_DIR} if length $ENV{OA_SESSION_DIR};
+    my $uid = defined $< ? $< : 0;
+    my $dir = "/tmp/oa/$uid";
+    # mkdir -p, two levels, without POSIX or File::Path
+    unless (-d $dir) {
+        mkdir('/tmp/oa') unless -d '/tmp/oa';
+        mkdir($dir) unless -d $dir;
+    }
+    return $dir;
+}
+
+# start (or resume) writing the transcript. idempotent: only the first call
+# creates a file, and only when we are about to run a real session.
+sub session_begin {
+    return if length $session_file;
+    my $dir = session_dir();
+    return unless -d $dir;
+    my $ts = time();
+    my $pid = $$;
+    $session_seq++;
+    $session_file = "$dir/sess-$ts-$pid-$session_seq.jsonl";
+    local *SF;
+    if (open(SF, ">$session_file")) {
+        chmod(0600, $session_file);   # the transcript is yours alone
+        close SF;
+        $session_open = 1;
+    } else {
+        $session_file = '';           # could not create it; go on without one
+        $session_open = 0;
+    }
+}
+
+# append one message to the transcript, now, while we have it in hand
+sub session_log {
+    my ($role, $content) = @_;
+    return unless length $session_file;
+    my $line = json_enc({ role => $role, content => $content });
+    local *SF;
+    if (open(SF, ">>$session_file")) { print SF $line, "\n"; close SF }
+}
+
+# the one way history grows: push it in memory and append it to the file, so
+# the file and @hist never drift apart. every message goes through here.
+sub hist {
+    my ($role, $content) = @_;
+    $content = '' unless defined $content;
+    push @hist, { role => $role, content => $content };
+    session_log($role, $content);
+}
+
+# read a transcript back into @hist so a session can be picked up where it left
+sub session_load {
+    my ($path) = @_;
+    local *SF;
+    open(SF, "<$path") or do { print STDERR "cannot read $path: $!\n"; return 0 };
+    my ($l, $d, $e, $n);
+    $n = 0;
+    while (defined($l = <SF>)) {
+        $l =~ s/\s+$//;
+        next unless length $l;
+        ($d, $e) = json_dec($l);
+        next if $e;
+        next unless ref($d) eq 'HASH' && defined $d->{role};
+        push @hist, { role => $d->{role}, content => (defined $d->{content} ? $d->{content} : '') };
+        $n++;
+    }
+    close SF;
+    $session_file = $path;            # keep appending to the same file
+    $session_open = 1;
+    return $n;
+}
 
 # `curl <url> | perl` reads the whole program from stdin, so stdin is at EOF
 # by the time the session starts: read the keyboard from /dev/tty instead.
@@ -51,6 +132,31 @@ my $have_tty = 0;
 if (!-t STDIN) { if (open(TTY, "/dev/tty")) { $have_tty = 1 } }
 my $cmd_pid    = 0;          # the bash child, for the timeout handler
 my $cmd_killed = 0;
+my $interrupted = 0;         # a Ctrl-C landed; the read loops notice it and stop
+my $at_prompt   = 0;         # parked at the "> " prompt (so Ctrl-C can report there)
+
+# Ctrl-C is not a crash. the transcript has been appended to disk the whole
+# time, one message at a time, so nothing is ever only in memory. Ctrl-C sets
+# a flag; the streaming loop breaks on it, the turn unwinds, and we keep the
+# prompt. if Ctrl-C lands while parked at the prompt, we report the session
+# right there (a tty read just retries after the signal, so we cannot wait for
+# it to notice). the transcript is the file, and the file outlives the process:
+# `oa1 resume <file>` always picks it back up.
+sub sig_int {
+    $interrupted = 1;
+    if ($at_prompt) {
+        $interrupted = 0;          # handled here, at the prompt; do not leak it on
+        print "\n";
+        session_end_notice();
+        print "> ";                # the blocked read is still live under this
+    }
+}
+
+sub session_end_notice {
+    return unless length $session_file;
+    print "session is on disk at:\n  $session_file\n";
+    print "resume it with:  oa1 resume $session_file\n";
+}
 
 # ------------------------------------------------------------------ json --
 # encode: a reference to a scalar is emitted raw (\"1", \"true", \"null").
@@ -392,6 +498,7 @@ sub http_req {
         }
         if ($cb && $status == 200) {
             while (defined($line = <SS>)) {
+                last if $interrupted;      # Ctrl-C cuts the stream here
                 $line =~ tr/\r//d;
                 next if $chunked && $line =~ /^[0-9a-fA-F]+\n?$/;
                 chomp $line;
@@ -1054,7 +1161,7 @@ sub show_flush {
 # one human message, run to completion. returns the final text.
 sub turn {
     my ($text) = @_;
-    push @hist, { role => 'user', content => $text };
+    hist('user', $text);
     my ($i, $reply, $err, $calls, $c, $final, $nudged);
     $final = '';
     $nudged = 0;
@@ -1070,7 +1177,7 @@ sub turn {
             return undef;
         }
         $reply = '' unless defined $reply;
-        push @hist, { role => 'assistant', content => $reply };
+        hist('assistant', $reply);
         my $prose = visible($reply);
         show_flush() if $streamed;
         print STDERR "--- reply $i (", length($reply), " chars):\n$reply\n---\n" if $cfg{debug};
@@ -1080,8 +1187,7 @@ sub turn {
         if (!@$calls) {
             if (!$nudged && $cfg{tools} && looks_like_intent($prose)) {
                 $nudged = 1;
-                push @hist, { role => 'user', content =>
-                    "No tool call was emitted, so nothing was executed. If you meant to act, emit the tool block now; if the task is done, end with a done block." };
+                hist('user', "No tool call was emitted, so nothing was executed. If you meant to act, emit the tool block now; if the task is done, end with a done block.");
                 next;
             }
             last;
@@ -1102,7 +1208,7 @@ sub turn {
             push @results, $r;
             show_result($c, $r);
         }
-        push @hist, { role => 'user', content => results_block(\@results) };
+        hist('user', results_block(\@results));
     }
     return $final;
 }
@@ -1253,6 +1359,8 @@ in the session:
   /history         what is in context
   /clear           forget the conversation (also /reset)
   /config          the settings in use (the same list this ends with)
+  /session         where this session is on disk (it is saved as you go)
+  /resume FILE     pick up a saved session and keep going
 
 anything else is a message to the model. the flags are command line only:
 `oa1 help` lists them.
@@ -1260,13 +1368,25 @@ HELP
 }
 
 sub repl {
+    local $SIG{INT} = 'sig_int';   # Ctrl-C reports the session and keeps going
+    session_begin();
     print "oa1 $VERSION - $cfg{provider} / $cfg{model} at $cfg{base_url}\n";
+    print "session: $session_file (on disk; resumable)\n" if length $session_file;
     print "type a message; /help for commands, /quit to leave\n\n";
     my ($line, $cmd, $arg);
     while (1) {
         print "> ";
+        $at_prompt = 1;
         $line = $have_tty ? <TTY> : <STDIN>;
-        last unless defined $line;
+        $at_prompt = 0;
+        unless (defined $line) {
+            # real EOF (Ctrl-D / a closed pipe) leaves. an interrupt at a tty
+            # prompt is already reported and cleared by the handler, which is
+            # still sitting under this read; only a non-tty read comes back
+            # here on a signal, and that gets one report then it keeps going.
+            if ($interrupted) { $interrupted = 0; print "\n"; session_end_notice(); next }
+            last;
+        }
         chomp $line;
         $line =~ s/^\s+//;
         $line =~ s/\s+$//;
@@ -1280,17 +1400,23 @@ sub repl {
             elsif ($cmd eq 'provider' && length $arg) { $cfg{provider} = $arg =~ /^openai/ ? 'openai' : 'ollama'; save_rc('provider', $cfg{provider}); print "provider = $cfg{provider}\n" }
             elsif ($cmd eq 'approve' && $arg =~ /^(ask|auto|off)$/) { $cfg{approve} = $1; print "approve = $1\n" }
             elsif ($cmd eq 'tools')   { $cfg{tools} = ($arg =~ /^(?:off|0|no)$/i) ? 0 : 1; print "tools = ", ($cfg{tools} ? 'on' : 'off'), "\n" }
-            elsif ($cmd eq 'clear' || $cmd eq 'reset') { @hist = (); print "(history cleared)\n" }
+            elsif ($cmd eq 'clear' || $cmd eq 'reset') { @hist = (); $session_file = ''; session_begin(); print "(history cleared)", (length $session_file ? " - new session: $session_file" : ""), "\n" }
             elsif ($cmd eq 'history') { my $m; for $m (@hist) { my $t = $m->{content}; $t =~ s/\n/ /g; print "  $m->{role}: ", substr($t, 0, 70), "\n" } }
             elsif ($cmd eq 'config')  { show_config() }
             elsif ($cmd eq 'models')  { cmd_models() }
+            elsif ($cmd eq 'session') { print (length $session_file ? "session: $session_file\n" : "no session file (could not create one)\n") }
+            elsif ($cmd eq 'resume' && length $arg) { my $n = session_load($arg); print $n ? "resumed $n messages - continuing\n" : "(nothing loaded from $arg)\n" }
             else { print "unknown command /$cmd (try /help)\n" }
             next;
         }
         turn($line);
         print "\n";
+        # Ctrl-C during the turn: the reply unwound and came back; report the
+        # session and keep the prompt (do not lose the whole run to a stray ^C).
+        if ($interrupted) { $interrupted = 0; session_end_notice() }
     }
     print "\n";
+    session_end_notice();
 }
 
 # is the configured model in the list? (perl 5.001 cannot parse grep({...} LIST))
@@ -1440,7 +1566,7 @@ sub main {
         $cfg{ascii} = ($lang =~ /utf-?8/i) ? 0 : 1;
     }
     $cfg{ascii} = ($cfg{ascii} =~ /^(?:0|off|no|utf-?8)$/i) ? 0 : 1;
-    $cmd = shift @rest if !defined $cmd && @rest && $rest[0] =~ /^(?:ask|do|models|doctor|config|help|version)$/;
+    $cmd = shift @rest if !defined $cmd && @rest && $rest[0] =~ /^(?:ask|do|resume|models|doctor|config|help|version)$/;
     $text = join(' ', @rest);
     $cmd = 'repl' unless defined $cmd;
     $cmd = 'ask' if $cmd eq 'repl' && length $text;
@@ -1450,6 +1576,20 @@ sub main {
     if ($cmd eq 'config')  { show_config(); return 0 }
     if ($cmd eq 'models')  { return cmd_models() }
     if ($cmd eq 'doctor')  { return cmd_doctor() }
+
+    if ($cmd eq 'resume') {
+        my $path = $text;
+        unless (length $path && -e $path) {
+            print "resume needs a session file:  oa1 resume <file>\n";
+            print "your sessions are in /tmp/oa/$< (newest first: ls -t /tmp/oa/$<)\n";
+            return 2;
+        }
+        my $n = session_load($path);
+        unless ($n) { print "no messages loaded from $path\n"; return 1 }
+        print "resumed $n messages from $path\n";
+        repl();
+        return 0;
+    }
 
     if (!length $cfg{model} && $cmd ne 'repl') {
         print "no model set: --model NAME, or /model NAME in a session (oa1 models lists them)\n";

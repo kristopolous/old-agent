@@ -275,4 +275,101 @@ ok($head !~ /^use /m || index($head, "BEGIN {\n    if ($] < 5.006") < index($hea
     like($loop, qr{not for this perl|the edition here}, 'oa1 oa: does not re-exec on the way back');
 }
 
+# --- 13. the session is a file: appended as it happens, resumed later ------
+#
+# the transcript is a jsonl file, appended to one message at a time as the
+# conversation grows. nothing in it is only in memory, so a Ctrl-C, a crash,
+# or the box dying loses nothing - `oa1 resume <file>` picks it up. these
+# tests run the real binary end to end and inspect the file it writes.
+{
+    # a throwaway session dir (the env override oa1 honours), so the test never
+    # reads or clobbers the user's real /tmp/oa/<uid> sessions
+    my $sdir = File::Spec->catdir($dir, 'sess');
+    mkdir $sdir;
+    my $saved_env = $ENV{OA_SESSION_DIR};
+    $ENV{OA_SESSION_DIR} = $sdir;
+
+    # a fake ollama: serves canned replies, self-terminates on its own alarm so
+    # it can never keep a waitpid below blocked
+    my $srv = IO::Socket::INET->new(Listen => 4, LocalAddr => '127.0.0.1', LocalPort => 0, Proto => 'tcp', ReuseAddr => 1) or die;
+    my $port = $srv->sockport;
+    my $pid = fork;
+    if (!$pid) {
+        # serve until the parent says stop (TERM) or this backstop fires, so it
+        # can never keep a waitpid below blocked
+        local $SIG{ALRM} = sub { exit 0 };
+        alarm 30;
+        my $c;
+        for (1..8) {
+            $c = $srv->accept or last;
+            my $len = 0;
+            while (defined(my $l = <$c>)) { $len = $1 if $l =~ /^Content-Length:\s*(\d+)/i; last if $l =~ /^\r?\n$/ }
+            my $body = ''; read($c, $body, $len) if $len;
+            print $c "HTTP/1.0 200 OK\r\n\r\n";
+            print $c "{\"message\":{\"content\":\"ok.\"},\"done\":false}\n{\"message\":{\"content\":\"\"},\"done\":true}\n";
+            close $c;
+        }
+        exit 0;
+    }
+    close $srv;
+
+    # every blocking step below runs inside an alarm window (via a code ref, so
+    # the alarm is set before the step runs), and a regression fails the test in
+    # seconds instead of hanging the whole run
+    my $guard = sub {
+        my ($code) = @_;
+        local $SIG{ALRM} = sub { kill 'KILL', $pid; die "oa1 hung in the session test\n" };
+        alarm 20;
+        my $r = &$code;
+        alarm 0;
+        return $r;
+    };
+
+    # first run: two messages in, a transcript file must appear on disk.
+    # the server child stays up (it serves the resume run next), so we do not
+    # waitpid here - that would block until it is done.
+    my $out = $guard->( sub { my $r = `printf 'first\nsecond\n' | perl $oa1 --no-config --base-url http://127.0.0.1:$port --model fake --ascii 2>&1`; $r } );
+
+    ok(-d $sdir, 'session: the per-user session directory was created');
+    my @files = glob "$sdir/*.jsonl";
+    my $latest = (sort { (stat($a))[9] <=> (stat($b))[9] } @files)[-1];
+    ok(defined $latest && -f $latest, 'session: a transcript file was written during the run');
+
+    my $log = '';
+    if (defined $latest && open(my $fh, '<', $latest)) { my $c = do { local $/; <$fh> }; $log = defined $c ? $c : ''; close $fh }
+    my @lines = grep { length } split(/\n/, $log);
+    my %seen;
+    my $okjson = 1;
+    for my $l (@lines) {
+        my ($d, $e) = main::json_dec($l);
+        $okjson = 0 unless ref $d eq 'HASH' && defined $d->{role} && defined $d->{content};
+        $seen{ $d->{role} . '\0' . $d->{content} }++;
+    }
+    ok(scalar(@lines) >= 4, 'session: the transcript holds both user turns and both replies');
+    ok($okjson, 'session: every transcript line is a {role,content} json object');
+    ok(defined $seen{'user\0first'} && defined $seen{'user\0second'}, 'session: the user\'s words are on disk, in order');
+    like($out, qr{session: \Q$latest\E}o, 'session: the banner names the transcript file');
+    like($out, qr{resume it with:\s+oa1 resume \Q$latest\E}o, 'session: it tells you how to get it back');
+
+    # resume: a fresh process reads the file and keeps the same one
+    my $out2 = $guard->( sub { my $r = `printf 'third\n' | perl $oa1 resume \Q$latest\E --no-config --base-url http://127.0.0.1:$port --model fake --ascii 2>&1`; $r } );
+    my $log2 = '';
+    if (open(my $fh, '<', $latest)) { my $c = do { local $/; <$fh> }; $log2 = defined $c ? $c : ''; close $fh }
+    like($out2, qr{resumed \d+ messages from \Q$latest\E}o, 'resume: says how many messages it picked up');
+    ok($log2 =~ /first/ && $log2 =~ /second/ && $log2 =~ /third/, 'resume: appends to the same file, keeping the earlier turns');
+
+    # resume with nothing there: a clear error, no hang
+    my $miss = `perl $oa1 resume /no/such/file --no-config 2>&1`;
+    like($miss, qr{resume needs a session file}, 'resume: missing file is a clear error');
+    isnt($? >> 8, 0, 'resume: missing file is a non-zero exit');
+
+    # tidy: restore the env, stop the server (it is idle in accept now that the
+    # runs are done), reap it, and clean the throwaway dir
+    $ENV{OA_SESSION_DIR} = $saved_env;
+    delete $ENV{OA_SESSION_DIR} unless defined $saved_env;
+    kill 'TERM', $pid;
+    $guard->( sub { waitpid($pid, 0) } );
+    unlink glob("$sdir/*.jsonl"); rmdir $sdir;
+}
+
 done_testing;
