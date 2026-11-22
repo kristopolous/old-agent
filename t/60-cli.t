@@ -5,7 +5,7 @@ use Test::More;
 use File::Spec ();
 use OldAgent::Util;
 
-plan tests => 32;
+plan tests => 33;
 
 my $perl = $^X;
 my $oa   = File::Spec->catfile('oa');
@@ -141,7 +141,8 @@ OldAgent::Util::spew($script, join("\n----\n",
 is($rc, 0, 'do exits 0');
 my ($data) = OldAgent::Util::slurp(File::Spec->catfile($dir, 'made.txt'));
 is($data, "from the cli\n", 'the cli actually wrote the file');
-like($out, qr/\[tool\] write/, 'tool use is shown');
+like($out, qr/\*\*write\*\*/, 'tool use is shown as markdown');
+like($out, qr/`\{.*"path":"made\.txt".*\}`/, 'the call is shown as json with braces');
 
 # --- stdin ------------------------------------------------------------
 my $inf = File::Spec->catfile($dir, 'in.txt');

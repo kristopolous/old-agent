@@ -318,6 +318,20 @@ in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
 
+0.1.18
+- tool status is markdown now, in both editions. the call used to print as
+  `[tool] bash cmd=ls`, which read as noise. it is now the tool name in bold
+  and its arguments as one json object with the braces intact: a short call
+  sits on the line as an inline code span (`bash {"cmd":"ls -la"}`), and a
+  long one - a `write`, a patch - drops into a fenced `json` block, pretty
+  printed two spaces deep, so its braces and line breaks render instead of
+  collapsing into a run-on. a value that itself contains backticks cannot
+  break the fence open: the fence is made longer than the longest run inside.
+  the formatter colours it on a terminal and leaves it as plain markdown for
+  a pipe, so a bot or a log gets the same text a person sees rendered.
+  `oa1` keeps the transcript fence-free (an old box renders text, not
+  markdown), so it shows the braces inline on one line.
+
 0.1.17
 - `oa-proxy` can web search now, with no key: `/search` calls keenable.ai's
   public endpoint (`X-Keenable-Title` names the app, so it works out of the

@@ -296,11 +296,11 @@ sub _run_one {
     my $name = $call->{tool};
     my $args = $call->{args};
     $self->{stats}{calls}++;
-    $self->emit('[tool] ' . $name . ' ' . _args_line($args));
+    $self->_tool_status($name, $args);
 
     if ($name eq 'bash' && !$self->_approved($args)) {
         $self->{stats}{denied}++;
-        $self->emit('[tool] denied by human');
+        $self->_emit_md('**' . $name . '** (denied by human)');
         return { tool => 'bash', ok => 0,
                  output => 'the human said no to that command. pick another approach.' };
     }
@@ -309,28 +309,70 @@ sub _run_one {
     return $r;
 }
 
-# the call as the human sees it: the command bare and whole, every other
-# argument in full. a multi-line value goes on its own lines, indented.
-# nothing is cut: a line clipped at 60 chars and a "..." wrapping onto a
-# line of its own looked like trash on an 80-column terminal.
-sub _args_line {
-    my ($args) = @_;
-    return '' unless ref($args) eq 'HASH';
-    my (@line, @block);
-    for my $k (sort keys %$args) {
-        my $v = OldAgent::JSON::plain($args->{$k});
-        $v = '' unless defined $v;
-        $v = OldAgent::Util::strip($v);
-        if ($v =~ /\n/) {
-            $v =~ s/^/    /mg;
-            push @block, "$k=\n$v";
-        } elsif ($k eq 'cmd' || $k eq 'command') {
-            unshift @line, $v;
-        } else {
-            push @line, "$k=$v";
-        }
+# the call as the human sees it, in simple markdown: the tool name in bold,
+# then the arguments as one JSON object with its braces intact. a short call
+# that fits a line becomes an inline code span; a long one, or one carrying
+# a multi-line value (a file's contents, a patch), goes in a fenced json
+# block so the braces and line breaks render instead of collapsing. nothing
+# is cut: a line clipped at 60 chars and a "..." wrapping onto a line of its
+# own looked like trash on an 80-column terminal.
+sub _tool_status {
+    my ($self, $name, $args) = @_;
+    my $obj = ref($args) eq 'HASH' ? $args : {};
+    if (!keys %$obj) {
+        $self->_emit_md('**' . $name . '**');
+        return;
     }
-    return join(' ', @line) . (@block ? "\n" . join("\n", @block) : '');
+    my $compact = OldAgent::JSON::encode($obj);
+    # a short call with no line breaks reads fine as an inline code span.
+    if ($compact !~ /\n/ && length($compact) <= 72) {
+        $self->_emit_md('**' . $name . '** `' . $compact . '`');
+        return;
+    }
+    # otherwise show the whole object, pretty printed, in a fenced json block
+    # so its braces and line breaks render rather than collapse.
+    my $pretty = _json_pretty($obj, '');
+    my $maxrun = 0;
+    while ($pretty =~ /(`+)/g) {
+        my $n = length($1);
+        $maxrun = $n if $n > $maxrun;
+    }
+    my $fence = '`' x ($maxrun + 3);
+    $self->_emit_md(join("\n", '**' . $name . '**',
+                         $fence . 'json', $pretty, $fence));
+}
+
+# pretty print a decoded-json value with two spaces per level, so a call's
+# braces and keys sit on their own lines the way a person would write them.
+# numbers that came back from the wire wrapped keep their raw text.
+sub _json_pretty {
+    my ($v, $pad) = @_;
+    my $pad2 = $pad . '  ';
+    my $r = ref($v);
+    if ($r eq 'HASH') {
+        my @keys = sort keys %$v;
+        return '{}' unless @keys;
+        my @parts;
+        for my $k (@keys) {
+            push @parts, $pad2 . OldAgent::JSON::encode($k) . ': '
+                . _json_pretty($v->{$k}, $pad2);
+        }
+        return "{\n" . join(",\n", @parts) . "\n" . $pad . '}';
+    }
+    if ($r eq 'ARRAY') {
+        return '[]' unless @$v;
+        my @parts = map { $pad2 . _json_pretty($_, $pad2) } @$v;
+        return "[\n" . join(",\n", @parts) . "\n" . $pad . ']';
+    }
+    return OldAgent::JSON::encode($v);
+}
+
+# emit a line of markdown: run through the formatter when one is set (so a
+# terminal gets colour) but leave it as markdown for a plain sink.
+sub _emit_md {
+    my ($self, $md) = @_;
+    $md = $self->{formatter}->($md) if ref($self->{formatter}) eq 'CODE';
+    $self->emit($md);
 }
 
 sub _approved {

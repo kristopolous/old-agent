@@ -22,7 +22,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.17';
+my $VERSION = '0.1.18';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
@@ -1225,18 +1225,20 @@ sub run_tool {
     return $r;
 }
 
+# the call as the human sees it, in simple markdown: the tool name in bold
+# and its arguments as one json object, braces and all, in a code span; the
+# status after. the call keeps its place on the line so an 80-column or a
+# phone screen both read it in one glance. this box borrows tls only through
+# curl, so the transcript stays free of fences - everything renders as text.
 sub show_result {
     my ($c, $r) = @_;
     return if $cfg{quiet};
-    my $args = $c->{args};
-    my $what = $c->{tool};
-    if ($c->{tool} =~ /^(?:bash|sh|shell|exec|run)$/) {
-        my $cmd = defined $args->{command} ? $args->{command} : (defined $args->{cmd} ? $args->{cmd} : '');
-        $what = "bash: $cmd";
-    } elsif (defined arg_path($args)) {
-        $what .= " " . arg_path($args);
-    }
-    print "  [$what] ", ($r->{ok} ? 'ok' : 'failed'), "\n";
+    my $args = ref($c->{args}) eq 'HASH' ? $c->{args} : {};
+    my $json = json_enc($args);
+    my $line = '  **' . $c->{tool} . '**';
+    $line .= ' `' . $json . '`' if $json ne '{}';
+    $line .= ' ' . ($r->{ok} ? 'ok' : 'failed');
+    print $line, "\n";
     # the whole result, nothing cut (the tool already clips it for the model);
     # two spaces per line so it is visibly the machine's output
     my @l = split(/\n/, $r->{output});

@@ -133,7 +133,7 @@ my $rc = $? >> 8;
 waitpid($pid, 0);
 is($rc, 0, 'oa1 do: exit 0') or diag($out);
 like($out, qr/I'll list the directory/, 'the streamed reply was printed');
-like($out, qr/\[list \.\] ok/, 'the tool line shows the call');
+like($out, qr/\*\*list\*\* `\{.*"path":"\.",?\}` ok/, 'the tool line shows the call as json');
 like($out, qr/hello\.txt\s+6/, 'the listing shows the file and its size');
 like($out, qr/\[done\]/, 'the done block ended the task');
 like($out, qr/There is one file, hello\.txt/, 'the final prose was printed');
