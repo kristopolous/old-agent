@@ -418,6 +418,38 @@ sub repl_command {
         }
         return;
     }
+    if ($c eq 'search' || $c eq 'web') {
+        my $proxy = $cfg->get('proxy');
+        unless ($proxy) {
+            print "no proxy set: point one at oa-proxy first, e.g.  /proxy 127.0.0.1:8080\n";
+            return;
+        }
+        my $q = $rest;
+        unless (length $q) {
+            print "usage:  /search <what to find>\n";
+            return;
+        }
+        eval { require OldAgent::Proxy; 1 };
+        if ($@) {
+            print "search is not available here (no OldAgent::Proxy)\n";
+            return;
+        }
+        print "searching via $proxy ...\n";
+        my ($res, $err) = OldAgent::Proxy::search($cfg, $proxy, $q, max_results => 6);
+        if ($err) {
+            print "search: $err\n";
+            return;
+        }
+        my $n = scalar @{ $res->{results} || [] };
+        unless ($n) {
+            print "no results for: $q\n";
+            return;
+        }
+        print OldAgent::Proxy::search_text($res), "\n";
+        print "($n result(s) via $proxy, keenable "
+            . ($res->{keyless} ? 'keyless' : 'keyed') . ")\n";
+        return;
+    }
     if ($c eq 'provider' || $c eq 'base-url' || $c eq 'url') {
         if ($c ne 'provider') {
             if (@r) {
@@ -760,6 +792,7 @@ sub _repl_help {
   /model [NAME]    show or set the model
   /provider        wizard: protocol, base url, key - or /provider <name|url>
   /base-url [URL]  show or set the endpoint url
+  /search Q        web search through the proxy (keenable); needs /proxy first
   /turns [N]       how many tool round trips per message
   /tools [on|off]  show tools, or switch them
   /yes  /no        run bash without asking / ask first

@@ -6,6 +6,7 @@ package OldAgent::Proxy;
 #   my ($st, $err) = OldAgent::Proxy::status($cfg, $addr);
 #   my ($text, $err) = OldAgent::Proxy::fetch($cfg, $addr, $url, %opt);
 #   my ($text, $err) = OldAgent::Proxy::mcp($cfg, $addr, \%payload);
+#   my ($json, $err) = OldAgent::Proxy::search($cfg, $addr, $query, %opt);
 #   my ($resp, $err) = OldAgent::Proxy::request($cfg, $addr, %a);
 #
 # $addr is "host:port" (port defaults to 8470).
@@ -71,6 +72,53 @@ sub mcp {
     return (undef, $e) if $e;
     return (undef, $json->{error} || 'proxy error') unless $json->{ok};
     return (OldAgent::Util::one_line($json->{text}), undef);
+}
+
+# web search through the proxy (keenable.ai on the far side). returns the
+# proxy's structured result: { ok, provider, keyless, query, mode,
+# results => [ { title, url, snippet, published_at, acquired_at }, ... ] }.
+# %opt passes straight through to the search API (max_results, site,
+# exclude_domains => [hosts], published_after, snippet_max_length, mode, ...).
+sub search {
+    my ($cfg, $addr, $query, %opt) = @_;
+    return (undef, 'no query') unless defined $query && length $query;
+    my %payload = (query => $query);
+    for my $p (qw(mode site published_after published_before
+                  acquired_after acquired_before query_time
+                  max_results snippet_max_length safety_mode
+                  objective session_id timeout)) {
+        $payload{$p} = $opt{$p} if defined $opt{$p};
+    }
+    if (ref($opt{exclude_domains}) eq 'ARRAY' && @{ $opt{exclude_domains} }) {
+        $payload{exclude_domains} = $opt{exclude_domains};
+    }
+    my $t = defined $opt{timeout} ? $opt{timeout} : 60;
+    my ($json, $e) = _post_json($cfg, $addr, '/search', \%payload, $t);
+    return (undef, $e) if $e;
+    return (undef, $json->{error} || 'proxy error') unless $json->{ok};
+    return ($json, undef);
+}
+
+# format a search result as a short, citable text block for the model.
+sub search_text {
+    my ($res) = @_;
+    return '' unless ref($res) eq 'HASH' && ref($res->{results}) eq 'ARRAY';
+    my @out;
+    my $i = 0;
+    for my $r (@{ $res->{results} }) {
+        next unless ref($r) eq 'HASH';
+        $i++;
+        my $title = defined $r->{title} ? $r->{title} : '';
+        my $url   = defined $r->{url}   ? $r->{url}   : '';
+        push @out, "$i. $title\n   $url";
+        if (defined $r->{snippet} && length $r->{snippet}) {
+            my $s = $r->{snippet};
+            $s =~ s/\s+/ /g;
+            $s = substr($s, 0, 400) . '...' if length($s) > 400;
+            push @out, "   $s";
+        }
+    }
+    return join("\n", @out);
 }
 
 # generic request relay: returns the proxy's { ok, status, reason, headers, body }

@@ -1,5 +1,7 @@
 oa-proxy is a way for you to connect to the modern internet on the old machines which may lack curl, TLS 1.2 or ways to parse javascript reasonably. You run oa-proxy on a modern machine and then do /proxy <ip>:<port> in your oa session and it can now get https webpages, get pages converted to markdown through lightpanda, even send screenshots (oa will use the tools such as xwd and then imagemagick to convert it to a modern format before sending it off to your model). oa-proxy also accepts a mcp.json where you can connect any standard mcp server such as context7, exa web search, or anything else. oa will be able to use them through oa-proxy.
 
+Web search needs no key. `/search` calls keenable.ai's public endpoint and returns ranked results (title, url, snippet). it sends an `X-Keenable-Title` header naming this app, which is all the public tier wants, so it works out of the box and costs nothing. if `KEENABLE_API_KEY` is set it moves to the keyed endpoint for higher limits, and `KEENABLE_API_URL` points it at a gateway or a self-hosted index.
+
 Start it on the modern machine with `oa-proxy --port 8470` (add `--mcp mcp.json` and `--lightpanda PATH` as needed). It prints how to reach it:
 
 ```
@@ -13,3 +15,25 @@ oa-proxy listening on 0.0.0.0:8470
 ```
 
 It listens on every interface. `--host 127.0.0.1` keeps it to that machine. On the old box, `oa --proxy 10.0.0.126:8470` is the same as typing `/proxy 10.0.0.126:8470` in the session.
+
+Search, end to end:
+
+```
+00:32:10 10.0.0.43  POST /search q="perl HTTP::Tiny POST"  -> ok 3  0.6s
+```
+
+On the modern box you can hit it directly:
+
+```
+curl -s http://10.0.0.126:8470/search \
+  -H 'Content-Type: application/json' \
+  -d '{"query":"how to write a perl http client","max_results":3}'
+# -> {"ok":1,"provider":"keenable","keyless":1,"results":[
+#       {"title":"...","url":"...","snippet":"..."}, ...]}
+```
+
+With a key:
+
+```
+KEENABLE_API_KEY=... oa-proxy --port 8470   # keyed tier, higher limits
+```

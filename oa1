@@ -22,7 +22,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.16';
+my $VERSION = '0.1.17';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
@@ -41,6 +41,7 @@ my %cfg = (
     rcfile   => '',
     noconfig => 0,
     system_extra => '',
+    proxy      => '',        # oa-proxy host:port, for web search (/search)
 );
 my @hist;                    # { role => ..., content => ... }
 my $session_file = '';       # the live transcript (jsonl), appended to as it happens
@@ -1321,6 +1322,7 @@ flags
   --base-url URL   http://host:port, or https://host when curl or wget
                    is on the box to carry the TLS
   --model NAME     model id
+  --proxy HOST:PORT an oa-proxy to run web search through (/search)
   --key KEY        api key, if the endpoint wants one
   --turns N        max tool round trips per task (default 12)
   --timeout N      seconds per model call (default: no limit)
@@ -1361,6 +1363,8 @@ in the session:
   /config          the settings in use (the same list this ends with)
   /session         where this session is on disk (it is saved as you go)
   /resume FILE     pick up a saved session and keep going
+  /proxy HOST:PORT an oa-proxy for web search (off to clear)
+  /search Q        web search through the proxy (keenable); needs /proxy first
 
 anything else is a message to the model. the flags are command line only:
 `oa1 help` lists them.
@@ -1406,6 +1410,18 @@ sub repl {
             elsif ($cmd eq 'models')  { cmd_models() }
             elsif ($cmd eq 'session') { print (length $session_file ? "session: $session_file\n" : "no session file (could not create one)\n") }
             elsif ($cmd eq 'resume' && length $arg) { my $n = session_load($arg); print $n ? "resumed $n messages - continuing\n" : "(nothing loaded from $arg)\n" }
+            elsif ($cmd eq 'proxy') {
+                if ($arg eq 'off' || $arg eq 'clear' || $arg eq 'none') {
+                    $cfg{proxy} = ''; save_rc('proxy', ''); print "proxy cleared\n";
+                } elsif (length $arg) {
+                    my $u = $arg;
+                    $u =~ s{^https?://}{}; $u =~ s{/.*$}{};
+                    $cfg{proxy} = $u; save_rc('proxy', $u); print "proxy = $u  (for /search)\n";
+                } else {
+                    print "proxy = ", (length $cfg{proxy} ? $cfg{proxy} : "(none)"), "\n";
+                }
+            }
+            elsif ($cmd eq 'search' || $cmd eq 'web') { search_via_proxy($arg); }
             else { print "unknown command /$cmd (try /help)\n" }
             next;
         }
@@ -1499,6 +1515,61 @@ sub cmd_models {
     return 0;
 }
 
+# web search through an oa-proxy: the proxy (a modern box) does the keenable
+# https call; oa1 only needs plain http, which http_req already has. the
+# dialect stays 5.000: no our, no foreach my, no qr//, no $f->().
+sub search_via_proxy {
+    my ($query) = @_;
+    my $proxy = $cfg{proxy};
+    if (!length $proxy) {
+        print "no proxy set:  /proxy 127.0.0.1:8080   (an oa-proxy, for web search)\n";
+        return 1;
+    }
+    if (!length $query) {
+        print "usage:  /search <what to find>\n";
+        return 2;
+    }
+    my $body = json_enc({ query => $query, max_results => 6 });
+    # http://host:port/search; http_req handles the connect + alarm + close.
+    # the proxy takes no auth, and http_req only adds a Bearer if api_key is set.
+    my ($st, $out, $err) = http_req('POST', "http://$proxy/search", $body, undef);
+    if (defined $err && $err ne '') {
+        print "search: $err\n";
+        return 1;
+    }
+    my ($d, $je) = json_dec($out);
+    if ($je || !ref($d)) {
+        my $m = (ref($d) eq 'HASH' && length $d->{error}) ? $d->{error} : ($je || "bad reply from the proxy (http $st)");
+        print "search: $m\n";
+        return 1;
+    }
+    my $res = $d->{results};
+    my $n = 0;
+    my $i = 0;
+    my $r;
+    if (ref($res) eq 'ARRAY') {
+        for $r (@$res) {
+            next unless ref($r) eq 'HASH';
+            $i++;
+            $n++;
+            my $title = defined $r->{title} ? $r->{title} : '';
+            my $url   = defined $r->{url}   ? $r->{url}   : '';
+            my $snip  = defined $r->{snippet} ? $r->{snippet} : '';
+            print $i . ". $title\n";
+            print "   $url\n" if length $url;
+            if (length $snip) {
+                $snip =~ s/\s+/ /g;
+                $snip = substr($snip, 0, 400) . '...' if length($snip) > 400;
+                print "   $snip\n";
+            }
+        }
+    }
+    if (!$n) { print "no results for: $query\n"; return 1 }
+    my $k = $d->{keyless} ? 'keyless' : 'keyed';
+    print "($n result(s) via $proxy, keenable $k)\n";
+    return 0;
+}
+
 sub main {
     my (@args, $opt, $cmd, $text);
     @args = @ARGV;
@@ -1553,7 +1624,7 @@ sub main {
         elsif ($opt eq '--utf8')      { $cfg{ascii} = 0 }
         elsif ($opt eq '-p')          { $cmd = 'ask'; push @rest, shift @args }
         elsif ($opt eq '--cd')        { my $d = shift @args; chdir($d) || die "cannot cd to $d: $!\n" }
-        elsif ($opt eq '--proxy')     { shift @args; print STDERR "oa1: --proxy ignored (oa1 talks to the model directly and has no fetch tool)\n" }
+        elsif ($opt eq '--proxy')     { my $u = shift @args; $u =~ s{^https?://}{}; $u =~ s{/.*$}{}; $cfg{proxy} = $u; save_rc('proxy', $u) unless $cfg{quiet} }
         elsif ($opt eq '-h' || $opt eq '--help') { help(); return 0 }
         elsif ($opt eq '--version')   { print "oa1 $VERSION (perl $])\n"; return 0 }
         elsif ($opt =~ /^-/)          { print "unknown flag $opt (try --help)\n"; return 2 }

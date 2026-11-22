@@ -289,6 +289,7 @@ Endpoints, all `POST` with a JSON body:
 | `/fetch`  | get a url as markdown (via lightpanda) or raw text          |
 | `/req`    | relay any request (method/headers/body) over HTTPS, raw back|
 | `/mcp`    | list or call a tool on a stdio MCP server (`mcp.json`)      |
+| `/search` | web search via keenable.ai - no key needed (or `X-API-Key`) |
 | `/shot`   | take a base64 image and save it to a file                   |
 
 On the legacy box, `oa-proxy` is invisible: `HTTP` relays any `https://` URL
@@ -307,8 +308,8 @@ oa-proxy --port 8470 --mcp ~/.oldagent/mcp.json \
 
 It listens on every interface (0.0.0.0) and says how to reach it as it
 starts: the `/proxy host:port` line to type in `oa` on the old box, one per
-address this machine has, and what it can do (fetch, lightpanda, which mcp
-servers loaded, where screenshots go). Every request is then logged as one
+address this machine has, and what it can do (fetch, lightpanda, web
+search, which mcp servers loaded, where screenshots go). Every request is then logged as one
 line: who asked, what for, how it went, how long it took. `--verbose` adds
 detail; `--quiet` silences it; `--host 127.0.0.1` keeps it local.
 
@@ -316,6 +317,15 @@ On the old box, `oa --proxy host:port` does what `/proxy host:port` does
 in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
+
+0.1.17
+- `oa-proxy` can web search now, with no key: `/search` calls keenable.ai's
+  public endpoint (`X-Keenable-Title` names the app, so it works out of the
+  box) and hands back ranked `title`/`url`/`snippet` results. set
+  `KEENABLE_API_KEY` (or `--keenable-key`) to move to the keyed tier for
+  higher limits, `KEENABLE_API_URL` to point at a gateway or self-hosted
+  index. `OldAgent::Proxy::search` is the matching client, and the proxy's
+  `/status` now reports what search it has.
 
 0.1.16
 - bash approval defaults to `auto` now: a bare agent runs bash commands

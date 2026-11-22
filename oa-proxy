@@ -11,6 +11,9 @@
 #   /mcp      {"server":"name","list":1}        -> {"ok":1,"tools":[...]}
 #   /mcp      {"server":"name","tool":"t","args":{...},"timeout":s}
 #             -> {"ok":1,"text":"result text"}
+#   /search   {"query":"...","max_results":N,...} -> {"ok":1,"results":[...]}
+#             web search via keenable.ai, no key needed (X-Keenable-Title names
+#             the app); set KEENABLE_API_KEY to use the keyed tier instead
 #   /shot     {"image_b64":"...","name":"x"}    -> {"ok":1,"path":"/tmp/..."}
 #
 # Modern Perl only; no old-Perl compatibility constraints.
@@ -31,21 +34,31 @@ BEGIN {
 }
 
 my %opt = (
-    port       => 8470,
-    host       => '0.0.0.0',
-    mcp_cfg    => '',
-    lightpanda => ($^O eq 'linux' ? 'lightpanda' : 'lightpanda'),
-    shot_dir   => "/tmp/oa-shots-$$",
+    port         => 8470,
+    host         => '0.0.0.0',
+    mcp_cfg      => '',
+    lightpanda   => ($^O eq 'linux' ? 'lightpanda' : 'lightpanda'),
+    shot_dir     => "/tmp/oa-shots-$$",
+    # web search: keenable.ai. keyless by default (the public endpoint only
+    # wants an X-Keenable-Title header naming the app). a key lifts the rate
+    # limit and is read from the environment, never required.
+    keenable_url => ($ENV{KEENABLE_API_URL} || 'https://api.keenable.ai'),
+    keenable_key => ($ENV{KEENABLE_API_KEY} || ''),
+    search_title => ($ENV{KEENABLE_TITLE} || 'oa-proxy'),
 );
 GetOptions(
-    'port=i'       => \$opt{port},
-    'host=s'       => \$opt{host},
-    'mcp=s'        => \$opt{mcp_cfg},
-    'lightpanda=s' => \$opt{lightpanda},
-    'shot-dir=s'   => \$opt{shot_dir},
-    'verbose'      => \$opt{verbose},
-    'quiet'        => \$opt{quiet},
-) or die "usage: oa-proxy [--port N] [--host ADDR] [--mcp mcp.json] [--lightpanda PATH] [--shot-dir DIR] [--verbose] [--quiet]\n";
+    'port=i'          => \$opt{port},
+    'host=s'          => \$opt{host},
+    'mcp=s'           => \$opt{mcp_cfg},
+    'lightpanda=s'    => \$opt{lightpanda},
+    'shot-dir=s'      => \$opt{shot_dir},
+    'keenable-url=s'  => \$opt{keenable_url},
+    'keenable-key=s'  => \$opt{keenable_key},
+    'search-title=s'  => \$opt{search_title},
+    'verbose'         => \$opt{verbose},
+    'quiet'           => \$opt{quiet},
+) or die "usage: oa-proxy [--port N] [--host ADDR] [--mcp mcp.json] [--lightpanda PATH] [--shot-dir DIR] [--keenable-url URL] [--keenable-key KEY] [--search-title NAME] [--verbose] [--quiet]\n";
+$opt{keenable_url} =~ s{/+$}{};
 
 # _say: always (unless --quiet). _log: detail, --verbose only.
 sub _say {
@@ -367,6 +380,120 @@ sub _req {
     };
 }
 
+# --- web search via keenable.ai ---
+# keyless: POST {base}/v1/search/public with an X-Keenable-Title header naming
+# this app; no account, no key, no cost. with KEENABLE_API_KEY set it uses the
+# keyed {base}/v1/search instead (higher limits, a `usage` block back). the base
+# is overridable (KEENABLE_API_URL) for a gateway or a self-hosted index.
+
+# params we forward to the search API; anything else the API would reject, so
+# we only pass through what we know.
+my @SEARCH_PARAMS = qw(
+    mode site published_after published_before acquired_after acquired_before
+    query_time max_results snippet_max_length safety_mode objective session_id
+);
+
+sub _search_error_msg {
+    my ($res) = @_ ;
+    my ($d) = _json_decode($res->{content});
+    if (ref($d) eq 'HASH') {
+        my $m = $d->{message} // $d->{error} // '';
+        return length $m ? $m : ($d->{reason} // '');
+    }
+    return $res->{reason} || 'request failed';
+}
+
+sub _search {
+    my ($body) = @_ ;
+    my ($req, $err) = _json_decode($body);
+    return { ok => 0, error => $err // 'bad json' } if $err;
+    my $query = $req->{query} // '';
+    return { ok => 0, error => 'no query' } unless length $query;
+    return { ok => 0, error => 'no http module' } unless eval { require HTTP::Tiny; 1 };
+
+    my $key   = $opt{keenable_key};
+    my $path  = $key ? '/v1/search' : '/v1/search/public';
+    my $url   = $opt{keenable_url} . $path;
+
+    my %args = (query => $query);
+    for my $p (@SEARCH_PARAMS) {
+        my $v = $req->{$p};
+        next unless defined $v;
+        if (ref $v eq 'ARRAY') {
+            # exclude_domains: clean up each entry to a plain host string
+            $args{$p} = [ grep { defined && length } map { "$_" } @$v ];
+        } else {
+            # JSON decodes numbers into scalars that lose their type, so an
+            # incoming "max_results": 3 arrives as the string "3"; coerce the
+            # numeric params back to numbers (non-numeric stays a string).
+            my $s = "" . $v;
+            $args{$p} = ($s =~ /^-?\d+(?:\.\d+)?$/ ? $s + 0 : $v);
+        }
+    }
+
+    my %headers = ('Content-Type' => 'application/json');
+    if ($key) { $headers{'X-API-Key'} = $key }
+    else      { $headers{'X-Keenable-Title'} = $opt{search_title} }
+
+    my $http    = HTTP::Tiny->new(timeout => ($req->{timeout} || 30));
+    my $content = _json_encode(\%args);
+
+    # bounded retries: 429/529/5xx wait (honouring Retry-After) and retry up to
+    # 3 times; 402 (out of funds) and other 4xx never retry.
+    my $res;
+    my $delay = 0;
+    for my $attempt (1 .. 3) {
+        select(undef, undef, undef, $delay) if $delay;
+        $res = $http->request('POST', $url,
+            { headers => \%headers, content => $content });
+        last if $res->{success};
+        my $st = $res->{status} || 0;
+        last if $st == 402 || $attempt == 3;
+        if ($st == 429 || $st == 529 || $st >= 500) {
+            my $ra = $res->{headers}{'retry-after'};
+            $delay = (defined $ra && $ra =~ /^\d+$/) ? ($ra > 8 ? 8 : $ra) : $attempt;
+        } else {
+            last;   # client error: the same request fails the same way
+        }
+    }
+
+    my $keyless = $key ? 0 : 1;
+    if (!$res->{success}) {
+        my $st = $res->{status} || 0;
+        return { ok => 0, error => "keenable $st: " . _search_error_msg($res),
+                 status => $st, provider => 'keenable', keyless => $keyless };
+    }
+
+    my ($data, $e) = _json_decode($res->{content});
+    return { ok => 0, error => "keenable: bad json: $e",
+             provider => 'keenable', keyless => $keyless } if $e;
+
+    my @out;
+    for my $r (@{ $data->{results} || [] }) {
+        next unless ref($r) eq 'HASH';
+        my %row = (
+            title   => ($r->{title} // ''),
+            url     => ($r->{url}   // ''),
+            snippet => ($r->{snippet} // ''),
+        );
+        $row{published_at} = $r->{published_at} if defined $r->{published_at};
+        $row{acquired_at}  = $r->{acquired_at}  if defined $r->{acquired_at};
+        push @out, \%row;
+    }
+
+    my %resp = (
+        ok       => 1,
+        provider => 'keenable',
+        keyless  => $keyless,
+        query    => ($data->{query} // $query),
+        mode     => ($data->{mode}  // ''),
+        results  => \@out,
+    );
+    $resp{usage}   = $data->{usage}   if ref($data->{usage}) eq 'HASH';
+    $resp{warning} = $data->{warning} if defined $data->{warning};
+    return \%resp;
+}
+
 sub _shot {
     my ($body) = @_;
     my ($req, $err) = _json_decode($body);
@@ -447,6 +574,11 @@ sub _banner {
     }
     my @can;
     push @can, (eval { require HTTP::Tiny; 1 } ? 'fetch and https relay' : 'no fetch (HTTP::Tiny missing)');
+    if (eval { require HTTP::Tiny; 1 }) {
+        push @can, ($opt{keenable_key}
+            ? 'search via keenable (api key)'
+            : "search via keenable (keyless; X-Keenable-Title: $opt{search_title})");
+    }
     push @can, (-x $opt{lightpanda} || _in_path($opt{lightpanda})
         ? "markdown via $opt{lightpanda}" : "no lightpanda ($opt{lightpanda} not found; raw/text only)");
     my @mcp = sort keys %MCP_SERVERS;
@@ -520,6 +652,9 @@ sub _handle {
             mcp => (scalar @mcp_names > 0 ? 1 : 0),
             mcp_servers => [ sort keys %MCP_SERVERS ],
             screenshot => 1,
+            search => (eval { require HTTP::Tiny; 1 } ? 1 : 0),
+            search_provider => 'keenable',
+            search_keyless => ($opt{keenable_key} ? 0 : 1),
         };
     } elsif ($path =~ m{^/fetch$}) {
         $resp = _fetch($body);
@@ -528,6 +663,8 @@ sub _handle {
         $resp = $e ? { ok => 0, error => $e } : { ok => 1, text => $text };
     } elsif ($path =~ m{^/req$}) {
         $resp = _req($body);
+    } elsif ($path =~ m{^/search$}) {
+        $resp = _search($body);
     } elsif ($path =~ m{^/shot$}) {
         $resp = _shot($body);
     } else {
@@ -543,6 +680,7 @@ sub _handle {
             $what .= " $b->{url}" if defined $b->{url};
             $what .= " $b->{server}" if defined $b->{server};
             $what .= "/$b->{tool}" if defined $b->{tool};
+            $what .= " q=\"" . _clip($b->{query}, 60) . "\"" if defined $b->{query};
             $what .= " (list)" if $b->{list};
             $what .= " $b->{name}" if $path eq '/shot' && defined $b->{name};
         }
