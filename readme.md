@@ -331,7 +331,11 @@ in the session (`--proxy off` ignores one the rc file set).
   ollama's streamed `tool_calls` fragments are stitched back together (name
   and id on the first, the arguments json split across the rest), and a
   server that never sends an id gets one synthesized so the tool results
-  still line up. an endpoint that refuses the `tools` parameter altogether
+  still line up. a model that glues junk to the tail of the arguments
+  object (a stray quote, a repeated fragment) does not cost a round trip:
+  the assembler rescues the first balanced json object inside the string -
+  tracking strings and escapes while it finds the closing brace - and only
+  reports a parse error when there is no complete object to save. an endpoint that refuses the `tools` parameter altogether
   (an old server, a gateway that drops unknown fields) is fought once: the
   session then falls back to the fence protocol for its remaining turns, so
   the one-file edition still works on anything. `/native-tools on|off`,

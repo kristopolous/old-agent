@@ -303,4 +303,57 @@ sub run_oa1 {
     like($out, qr/Hello there\./, 'the answer was printed with no nudge, one call only');
 }
 
+# ---------------------------------------------------------------------------
+# 5. a model that appends junk after the arguments object (a trailing
+#    quote, a backtick, a repeated fragment - the kind of thing the
+#    streaming models actually emit). json_dec refuses the whole string;
+#    the assembler must rescue the first balanced object inside it, run
+#    the call, and not report a parse error.
+# ---------------------------------------------------------------------------
+{
+    my $log = File::Spec->catfile($dir, 'junk.log');
+    my $srv = IO::Socket::INET->new(
+        Listen => 8, LocalAddr => '127.0.0.1', LocalPort => 0, Proto => 'tcp', ReuseAddr => 1,
+    ) or plan skip_all => "cannot listen: $!";
+    my $port = $srv->sockport;
+    my $pid = spawn(sub {
+        my ($n, $c, $head, $body);
+        my $LOG;
+        open($LOG, '>', $log) or exit 1;
+        $LOG->autoflush(1);
+        for $n (1 .. 2) {
+            $c = $srv->accept or last;
+            ($head, $body) = read_request($c);
+            print $LOG "=== request $n\n$body\n";
+            print $c "HTTP/1.0 200 OK\r\nContent-Type: application/x-ndjson\r\n\r\n";
+            if ($n == 1) {
+                # the arguments object, fragmented - with junk glued to the
+                # tail of the last fragment, after the closing brace.
+                print $c '{"message":{"role":"assistant","tool_calls":[{"id":"call_7","function":{"name":"bash","arguments":"{\"command\":"}}]},"done":false}
+';
+                print $c '{"message":{"role":"assistant","tool_calls":[{"function":{"arguments":"\"echo rescued > out.txt\"} junk tail\""}}]},"done":false}
+';
+                print $c '{"message":{"role":"assistant","content":""},"done":true}
+';
+            } else {
+                print $c '{"message":{"role":"assistant","content":"Done."},"done":false}
+';
+                print $c '{"message":{"role":"assistant","content":""},"done":true}
+';
+            }
+            close $c;
+        }
+    });
+    close $srv;
+
+    local $ENV{OA_SESSION_DIR} = $sessdir;
+    my ($out, $rc) = run_oa1($dir, $port, 'ollama', '-y', 'make out.txt say rescued');
+    kill 'TERM', $pid; waitpid($pid, 0);
+    is($rc, 0, 'junk tail: exit 0') or diag($out);
+    unlike($out, qr/not json/, 'the arguments were rescued, not reported as unparseable');
+    like($out, qr/\*\*bash\*\* `\{.*"command":"echo rescued > out\.txt".*\}` ok/, 'the rescued call ran');
+    is(slurp(File::Spec->catfile($dir, 'out.txt')), "rescued\n", 'the command ran with the rescued arguments');
+    unlink File::Spec->catfile($dir, 'out.txt');
+}
+
 done_testing;

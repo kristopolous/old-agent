@@ -597,6 +597,39 @@ sub ollama_line {
     }
 }
 
+# models sometimes append junk after the object they emit (a trailing
+# quote, a backtick, a repeated fragment) and json_dec refuses the whole
+# string. rescue the first balanced object inside it: scan from the first
+# { to its matching } while tracking strings and escapes. undef when the
+# object never closes.
+sub first_json_object {
+    my ($s) = @_;
+    my ($i, $n, $c, $depth, $in, $esc, $start);
+    $n = length $s;
+    $start = index($s, '{');
+    return undef if $start < 0;
+    $depth = 0;
+    $in = 0;
+    $esc = 0;
+    for ($i = $start; $i < $n; $i++) {
+        $c = substr($s, $i, 1);
+        if ($in) {
+            if ($esc)     { $esc = 0 }
+            elsif ($c eq '\\') { $esc = 1 }
+            elsif ($c eq '"')  { $in = 0 }
+        } else {
+            if ($c eq '"')  { $in = 1 }
+            elsif ($c eq '{') { $depth++ }
+            elsif ($c eq '}') {
+                $depth--;
+                last if $depth == 0;
+            }
+        }
+    }
+    return undef if $depth != 0;
+    return substr($s, $start, $i - $start + 1);
+}
+
 # turn the accumulated fragments into calls the loop can run. the arguments
 # arrive as a json string (the openai contract); a server that sends an
 # object instead is already shaped for us. ids the server leaves out are
@@ -616,9 +649,21 @@ sub tcs_assemble {
         if (length $args) {
             ($dec, $e2) = json_dec($args);
             if ($e2) {
-                push @$out, { id => ($slot->{id} || 'oa1_' . $i), name => $slot->{name},
-                              args => {}, error => 'the tool arguments are not json: ' . $e2 };
-                next;
+                # models append junk after the object sometimes: a trailing
+                # quote, a backtick, a repeated fragment. json_dec refuses
+                # the whole string; rescue the first balanced object inside
+                # it instead of throwing the call away.
+                my $obj = first_json_object($args);
+                if (defined $obj) {
+                    my ($d2, $e3);
+                    ($d2, $e3) = json_dec($obj);
+                    $dec = $d2 unless $e3;
+                }
+                if (ref($dec) ne 'HASH') {
+                    push @$out, { id => ($slot->{id} || 'oa1_' . $i), name => $slot->{name},
+                                  args => {}, error => 'the tool arguments are not json: ' . $e2 };
+                    next;
+                }
             }
         }
         $dec = {} unless ref($dec) eq 'HASH';
