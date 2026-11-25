@@ -22,7 +22,7 @@ use strict;
 use Socket;
 use Config;
 
-my $VERSION = '0.1.18';
+my $VERSION = '0.1.19';
 
 # ---------------------------------------------------------------- state --
 my %cfg = (
@@ -32,6 +32,7 @@ my %cfg = (
     api_key  => '',
     approve  => 'auto',      # ask | auto | off - auto by default: let it run; /no or /approve ask to opt back in
     tools    => 1,
+    native_tools => 1,      # real api tool calling (tools in the request, tool_calls in the reply); an endpoint that rejects the parameter falls back to the fence protocol
     turns    => 12,
     timeout  => 0,          # seconds per model call; 0 = wait forever
     thinking => '',        # 1 forces reasoning on, 0 off; empty = the model decides
@@ -89,9 +90,9 @@ sub session_begin {
 
 # append one message to the transcript, now, while we have it in hand
 sub session_log {
-    my ($role, $content) = @_;
+    my ($m) = @_;
     return unless length $session_file;
-    my $line = json_enc({ role => $role, content => $content });
+    my $line = json_enc($m);
     local *SF;
     if (open(SF, ">>$session_file")) { print SF $line, "\n"; close SF }
 }
@@ -99,10 +100,12 @@ sub session_log {
 # the one way history grows: push it in memory and append it to the file, so
 # the file and @hist never drift apart. every message goes through here.
 sub hist {
-    my ($role, $content) = @_;
+    my ($role, $content, $extra) = @_;
     $content = '' unless defined $content;
-    push @hist, { role => $role, content => $content };
-    session_log($role, $content);
+    my $m = ref($extra) eq 'HASH' ? { role => $role, content => $content, %$extra }
+                                  : { role => $role, content => $content };
+    push @hist, $m;
+    session_log($m);
 }
 
 # read a transcript back into @hist so a session can be picked up where it left
@@ -118,7 +121,10 @@ sub session_load {
         ($d, $e) = json_dec($l);
         next if $e;
         next unless ref($d) eq 'HASH' && defined $d->{role};
-        push @hist, { role => $d->{role}, content => (defined $d->{content} ? $d->{content} : '') };
+        my %m = ( role => $d->{role}, content => (defined $d->{content} ? $d->{content} : '') );
+        $m{tool_calls} = $d->{tool_calls} if ref($d->{tool_calls}) eq 'ARRAY';
+        $m{tool_call_id} = $d->{tool_call_id} if defined $d->{tool_call_id} && length $d->{tool_call_id};
+        push @hist, \%m;
         $n++;
     }
     close SF;
@@ -131,6 +137,9 @@ sub session_load {
 # by the time the session starts: read the keyboard from /dev/tty instead.
 my $have_tty = 0;
 if (!-t STDIN) { if (open(TTY, "/dev/tty")) { $have_tty = 1 } }
+# set when the endpoint answers that it will not take the tools parameter;
+# the session then runs on the fence protocol instead (see native_active)
+my $native_dead = 0;
 my $cmd_pid    = 0;          # the bash child, for the timeout handler
 my $cmd_killed = 0;
 my $interrupted = 0;         # a Ctrl-C landed; the read loops notice it and stop
@@ -543,7 +552,9 @@ sub dechunk {
 }
 
 # ------------------------------------------------------------- provider --
-# chat(system, messages, token_cb) -> (text, error). with ollama the reply
+# chat(system, messages, token_cb) -> (text, error, tool_calls). the third
+# item is a list of {id, name, args} when the model answered with native
+# tool calls (and native mode was on), otherwise undef. with ollama the reply
 # streams and token_cb sees each piece as it lands.
 sub chat {
     my ($system, $msgs, $tokcb) = @_;
@@ -551,7 +562,7 @@ sub chat {
     return chat_ollama($system, $msgs, $tokcb);
 }
 
-my ($stream_text, $stream_err, $stream_cb);
+my ($stream_text, $stream_err, $stream_cb, $stream_tcs);
 sub ollama_line {
     my ($line) = @_;
     my ($d, $e) = json_dec($line);
@@ -564,6 +575,58 @@ sub ollama_line {
         $stream_text .= $piece;
         &$stream_cb($piece) if $stream_cb;
     }
+    # tool calls stream in as fragments: one element per call index, the
+    # name and id on the first fragment, the arguments json string arriving
+    # piece by piece. accumulate by index and let tcs_assemble decode them.
+    my $tcs = $d->{message}{tool_calls};
+    if (ref($tcs) eq 'ARRAY') {
+        my $i;
+        for $i (0 .. $#{ $tcs }) {
+            my $tc = $tcs->[$i];
+            next unless ref($tc) eq 'HASH' && ref($tc->{function}) eq 'HASH';
+            my $slot = $stream_tcs->[$i] ||= {};
+            my $f = $tc->{function};
+            $slot->{name} = $f->{name} if defined $f->{name} && length $f->{name} && !defined $slot->{name};
+            $slot->{id}   = $tc->{id}   if defined $tc->{id}   && length $tc->{id}   && !defined $slot->{id};
+            my $arg = $f->{arguments};
+            if (defined $arg) {
+                my $argstr = ref($arg) ? json_enc($arg) : $arg;
+                $slot->{args} = defined $slot->{args} ? $slot->{args} . $argstr : $argstr;
+            }
+        }
+    }
+}
+
+# turn the accumulated fragments into calls the loop can run. the arguments
+# arrive as a json string (the openai contract); a server that sends an
+# object instead is already shaped for us. ids the server leaves out are
+# synthesized, because the role:tool result below must name the call it
+# answers.
+sub tcs_assemble {
+    my $t = $stream_tcs;
+    $stream_tcs = [];
+    my ($out, $i, $slot, $args, $dec, $e2, $id);
+    $out = [];
+    for $i (0 .. $#{ $t }) {
+        $slot = $t->[$i];
+        next unless ref($slot) eq 'HASH' && defined $slot->{name} && length $slot->{name};
+        $args = $slot->{args};
+        $args = '' unless defined $args;
+        $dec = {};
+        if (length $args) {
+            ($dec, $e2) = json_dec($args);
+            if ($e2) {
+                push @$out, { id => ($slot->{id} || 'oa1_' . $i), name => $slot->{name},
+                              args => {}, error => 'the tool arguments are not json: ' . $e2 };
+                next;
+            }
+        }
+        $dec = {} unless ref($dec) eq 'HASH';
+        $id = $slot->{id};
+        $id = 'oa1_' . $i if !defined $id || !length $id;
+        push @$out, { id => $id, name => $slot->{name}, args => $dec };
+    }
+    return $out;
 }
 
 sub chat_ollama {
@@ -575,27 +638,38 @@ sub chat_ollama {
     $options{think} = \($cfg{thinking} eq '1' ? 'true' : 'false') if $cfg{thinking} =~ /^[01]$/;
     # /api/chat has no top-level system field (that is /api/generate): the
     # prompt goes in as the first message, or the model never learns it
-    # has tools and answers like a chatbot
+    # has tools and answers like a chatbot. extra message fields (tool_calls
+    # on an assistant echo, tool_call_id on a role:tool result) are the
+    # native continuation, passed through when present.
+    my $m;
+    my @messages = ({ role => 'system', content => $system });
+    for $m (@$msgs) {
+        my %mm = ( role => $m->{role}, content => $m->{content} );
+        $mm{tool_calls} = $m->{tool_calls} if ref($m->{tool_calls}) eq 'ARRAY';
+        $mm{tool_call_id} = $m->{tool_call_id} if defined $m->{tool_call_id} && length $m->{tool_call_id};
+        push @messages, \%mm;
+    }
     my %payload = (
         model    => $cfg{model},
-        messages => [ { role => 'system', content => $system },
-                      map { { role => $_->{role}, content => $_->{content} } } @$msgs ],
+        messages => \@messages,
         stream   => \'true',
         options  => \%options,
     );
+    $payload{tools} = tool_schemas() if native_active();
     $stream_text = '';
     $stream_err  = '';
+    $stream_tcs  = [];
     $stream_cb   = $tokcb;
     my ($st, $body, $err) = http_req('POST', "$base/api/chat", json_enc(\%payload), \&ollama_line);
-    return (undef, $err) if $err;
-    return (undef, $stream_err) if $stream_err;
+    return (undef, $err, undef) if $err;
+    return (undef, $stream_err, undef) if $stream_err;
     if ($st != 200) {
         my ($d, $e) = json_dec($body);
         my $m = (!$e && ref($d) eq 'HASH' && defined $d->{error}) ? $d->{error} : $body;
         $m = substr($m, 0, 300);
-        return (undef, "ollama at $base answered http $st: $m");
+        return (undef, "ollama at $base answered http $st: $m", undef);
     }
-    return ($stream_text, undef);
+    return ($stream_text, undef, tcs_assemble());
 }
 
 sub chat_openai {
@@ -605,32 +679,62 @@ sub chat_openai {
     $base .= '/v1' unless $base =~ m!/v1$!;
     my @m = ({ role => 'system', content => $system });
     my $x;
-    for $x (@$msgs) { push @m, { role => $x->{role}, content => $x->{content} } }
+    for $x (@$msgs) {
+        my %mm = ( role => $x->{role}, content => $x->{content} );
+        $mm{tool_calls} = $x->{tool_calls} if ref($x->{tool_calls}) eq 'ARRAY';
+        $mm{tool_call_id} = $x->{tool_call_id} if defined $x->{tool_call_id} && length $x->{tool_call_id};
+        push @m, \%mm;
+    }
     my %payload = (
         model    => $cfg{model},
         messages => \@m,
         stream   => \'false',
         temperature => \'0.2',
     );
+    $payload{tools} = tool_schemas() if native_active();
     my ($st, $body, $err) = http_req('POST', "$base/chat/completions", json_enc(\%payload), undef);
-    return (undef, $err) if $err;
+    return (undef, $err, undef) if $err;
     my ($d, $e) = json_dec($body);
     if ($st != 200) {
         my $m = (!$e && ref($d) eq 'HASH' && ref($d->{error}) eq 'HASH') ? $d->{error}{message} : $body;
         $m = substr($m, 0, 300);
-        return (undef, "$base answered http $st: $m");
+        return (undef, "$base answered http $st: $m", undef);
     }
-    return (undef, "bad json from $base: $e") if $e;
-    return (undef, "error from $base: " . (ref($d->{error}) ? $d->{error}{message} : $d->{error}))
+    return (undef, "bad json from $base: $e", undef) if $e;
+    return (undef, "error from $base: " . (ref($d->{error}) ? $d->{error}{message} : $d->{error}), undef)
         if ref($d) eq 'HASH' && defined $d->{error};
     my $ch = (ref($d) eq 'HASH' && ref($d->{choices}) eq 'ARRAY') ? $d->{choices}[0] : undef;
-    return (undef, "no choices in the reply from $base") unless ref($ch) eq 'HASH';
+    return (undef, "no choices in the reply from $base", undef) unless ref($ch) eq 'HASH';
     my $msg = $ch->{message};
     my $text = ref($msg) eq 'HASH' ? $msg->{content} : $ch->{text};
     $text = '' unless defined $text;
-    # native function calling: turn it into our fenced form
+    my $tcs;
+    my $tc;
+    if (ref($msg) eq 'HASH' && ref($msg->{tool_calls}) eq 'ARRAY' && native_active()) {
+        # native: hand the calls back structured, the loop runs them and
+        # reports the results as role:tool messages the model expects.
+        $tcs = [];
+        for $tc (@{ $msg->{tool_calls} }) {
+            next unless ref($tc) eq 'HASH' && ref($tc->{function}) eq 'HASH';
+            my $args = $tc->{function}{arguments};
+            $args = json_enc($args) if ref $args;
+            $args = '{}' unless defined $args && length $args;
+            my ($dec, $e2) = json_dec($args);
+            if ($e2) {
+                push @$tcs, { id => ($tc->{id} || ''), name => $tc->{function}{name},
+                              args => {}, error => 'the tool arguments are not json: ' . $e2 };
+                next;
+            }
+            $dec = {} unless ref($dec) eq 'HASH';
+            my $id = $tc->{id};
+            $id = 'oa1x_' . ($#{ $tcs } + 1) if !defined $id || !length $id;
+            push @$tcs, { id => $id, name => $tc->{function}{name}, args => $dec };
+        }
+        return ($text, undef, $tcs);
+    }
     if (ref($msg) eq 'HASH' && ref($msg->{tool_calls}) eq 'ARRAY') {
-        my $tc;
+        # not native (fence mode): a model that still sent tool calls gets
+        # them converted into our fenced form so parse_calls can run them.
         for $tc (@{ $msg->{tool_calls} }) {
             next unless ref($tc) eq 'HASH' && ref($tc->{function}) eq 'HASH';
             my $args = $tc->{function}{arguments};
@@ -640,7 +744,7 @@ sub chat_openai {
                   . ",\"args\":$args}\n```\n";
         }
     }
-    return ($text, undef);
+    return ($text, undef, undef);
 }
 
 sub list_models {
@@ -829,6 +933,80 @@ Tools you can use (one JSON object per ```tool block):
   done   {"tool":"done","args":{summary}}
          call this when the task is finished
 SPEC
+}
+
+# native api tool calling: the tools parameter in the request, tool_calls in
+# the reply, role:tool results back. on by default - some models only respond
+# to real function calling, never to a protocol described in the prompt.
+# an endpoint that refuses the tools parameter flips us back to the fence
+# protocol for the rest of the session (see $native_dead in turn).
+sub native_active {
+    return 0 unless $cfg{tools} && $cfg{native_tools} && !$native_dead;
+    return 1;
+}
+
+# the tools in the api shape the servers want: a function, its description,
+# and a json-schema parameters object. done is not a tool here - in native
+# mode the model was trained to end a task by simply calling nothing, so the
+# loop ends on an answer with no tool_calls, no done block to invent.
+sub tool_schemas {
+    return [
+        { type => 'function', function => {
+            name => 'bash',
+            description => 'Run a shell command on this machine. stdout and stderr are merged and returned. Default timeout 30s, max 600s.',
+            parameters => { type => 'object',
+                properties => {
+                    command => { type => 'string', description => 'the shell command to run' },
+                    timeout => { type => 'integer', description => 'seconds, 1-600, default 30' },
+                },
+                required => ['command'] },
+        } },
+        { type => 'function', function => {
+            name => 'read',
+            description => 'Read a text file from disk.',
+            parameters => { type => 'object',
+                properties => {
+                    path  => { type => 'string',  description => 'the file to read' },
+                    from  => { type => 'integer', description => 'first line, 1-based, default 1' },
+                    lines => { type => 'integer', description => 'how many lines, default 200' },
+                },
+                required => ['path'] },
+        } },
+        { type => 'function', function => {
+            name => 'write',
+            description => 'Create or overwrite a file with exactly this content. mode=append adds to the end instead.',
+            parameters => { type => 'object',
+                properties => {
+                    path    => { type => 'string', description => 'the file to write' },
+                    content => { type => 'string', description => 'the full file content' },
+                    mode    => { type => 'string', enum => ['append'] },
+                },
+                required => ['path', 'content'] },
+        } },
+        { type => 'function', function => {
+            name => 'edit',
+            description => 'Replace exact text in a file. find must match byte for byte.',
+            parameters => { type => 'object',
+                properties => {
+                    path    => { type => 'string', description => 'the file to edit' },
+                    find    => { type => 'string', description => 'the exact text to replace' },
+                    replace => { type => 'string', description => 'the replacement, empty to delete' },
+                    all     => { type => 'boolean', description => 'replace every match, default the first' },
+                },
+                required => ['path', 'find'] },
+        } },
+        { type => 'function', function => {
+            name => 'list',
+            description => 'List the entries of a directory.',
+            parameters => { type => 'object',
+                properties => {
+                    path  => { type => 'string',  description => 'the directory, default the current one' },
+                    glob  => { type => 'string',  description => 'only entries matching, e.g. *.c' },
+                    limit => { type => 'integer', description => 'max entries, default 200' },
+                },
+            },
+        } },
+    ];
 }
 
 sub arg_path {
@@ -1063,7 +1241,26 @@ sub system_prompt {
     $s .= "Environment\n  host: $host\n";
     $s .= "  os:   $os\n" if length $os;
     $s .= "  perl: $]\n  cwd:  $cwd\n\n";
-    if ($cfg{tools}) {
+    if ($cfg{tools} && native_active()) {
+        # native mode: the model calls tools through the api. it was trained
+        # on that - there is no fence protocol to learn and no done block to
+        # end the task with. it ends the task the way it was trained to:
+        # by answering with no tool call.
+        $s .= "How to act\n"
+            . "You have tools you can call through the api: read, write, edit, list, bash. "
+            . "Call a tool whenever you need one; the system runs it and returns the result "
+            . "in the next message. Never say you cannot run something - call the tool "
+            . "instead. Questions about this machine - what it is, what is installed, what "
+            . "is wrong - are answered by running a command and reading the result, not from "
+            . "memory. Execution stops at the end of your reply; results arrive in the next message.\n\n"
+            . "Rules\n"
+            . "  - Never invent or predict a result. Call, stop, and wait.\n"
+            . "  - Read before you write. Use edit for small changes, write for new files.\n"
+            . "  - Keep output small: read with from/lines, list with glob.\n"
+            . "  - When the task is finished, reply with a short plain-text summary and make no further tool calls.\n"
+            . "  - Plain prose is shown to the human. A conversational reply needs no tool call.\n"
+            . "  - Only act on what the human asked for in this conversation. Do not go looking for other work.\n";
+    } elsif ($cfg{tools}) {
         $s .= "How to act\n"
             . "You act by emitting a fenced block tagged tool containing one JSON "
             . "object; the system runs it and returns the result. Never say you "
@@ -1163,7 +1360,7 @@ sub show_flush {
 sub turn {
     my ($text) = @_;
     hist('user', $text);
-    my ($i, $reply, $err, $calls, $c, $final, $nudged);
+    my ($i, $reply, $err, $tcs, $calls, $c, $final, $nudged, $native, $n, $k);
     $final = '';
     $nudged = 0;
     for $i (1 .. $cfg{turns}) {
@@ -1171,27 +1368,57 @@ sub turn {
         ($tok_line, $tok_in_fence, $tok_shown) = ("", 0, 0);
         say("\n") if $i > 1;
         print STDERR "--- system prompt:\n", system_prompt(), "---\n" if $cfg{debug} && $i == 1 && @hist == 1;
-        ($reply, $err) = chat(system_prompt(), \@hist, ($cfg{quiet} ? undef : \&show_token));
+        ($reply, $err, $tcs) = chat(system_prompt(), \@hist, ($cfg{quiet} ? undef : \&show_token));
+        # an endpoint that refuses the tools parameter (an old server, a
+        # gateway that drops unknown fields) is not worth a second fight:
+        # flip the session onto the fence protocol and try this same turn
+        # once more, which also re-learns the prompt (it now teaches fences).
+        if ($err && native_active()) {
+            $native_dead = 1;
+            ($reply, $err, $tcs) = chat(system_prompt(), \@hist, ($cfg{quiet} ? undef : \&show_token));
+        }
         if ($err) {
             print "\nerror: $err\n";
             pop @hist if $i == 1 && !$nudged;   # the question did not land
             return undef;
         }
         $reply = '' unless defined $reply;
-        hist('assistant', $reply);
         my $prose = visible($reply);
         show_flush() if $streamed;
         print STDERR "--- reply $i (", length($reply), " chars):\n$reply\n---\n" if $cfg{debug};
         print fold($prose), "\n" if !$streamed && length $prose;
         $final = $prose if length $prose;
-        $calls = $cfg{tools} ? parse_calls($reply) : [];
-        if (!@$calls) {
-            if (!$nudged && $cfg{tools} && looks_like_intent($prose)) {
-                $nudged = 1;
-                hist('user', "No tool call was emitted, so nothing was executed. If you meant to act, emit the tool block now; if the task is done, end with a done block.");
-                next;
+        $native = 0;
+        if (ref($tcs) eq 'ARRAY' && @$tcs) {
+            # native: echo the calls as the servers expect them (the openai
+            # wire shape) so the role:tool results below line up by id, then
+            # run them.
+            $calls = [];
+            my $wire = [];
+            for $n (@$tcs) {
+                my %m = ( tool => $n->{name}, args => $n->{args}, id => $n->{id} );
+                $m{error} = $n->{error} if defined $n->{error};
+                push @$calls, \%m;
+                push @$wire, { id => $n->{id}, type => 'function',
+                              function => { name => $n->{name}, arguments => json_enc($n->{args}) } };
             }
-            last;
+            hist('assistant', $reply, { tool_calls => $wire });
+            $native = 1;
+        } else {
+            hist('assistant', $reply);
+            $calls = $cfg{tools} ? parse_calls($reply) : [];
+            if (!@$calls) {
+                if (!$nudged && $cfg{tools} && looks_like_intent($prose)) {
+                    $nudged = 1;
+                    # in native mode the model was never trained a done block;
+                    # the way it ends a task is to stop calling tools.
+                    hist('user', native_active()
+                        ? "No tool was called, so nothing was executed. If you meant to act, call the tool now; if the task is finished, reply with your summary as plain text."
+                        : "No tool call was emitted, so nothing was executed. If you meant to act, emit the tool block now; if the task is done, end with a done block.");
+                    next;
+                }
+                last;
+            }
         }
         my @results;
         for $c (@$calls) {
@@ -1209,7 +1436,16 @@ sub turn {
             push @results, $r;
             show_result($c, $r);
         }
-        hist('user', results_block(\@results));
+        if ($native) {
+            # the native continuation: each result goes back as the
+            # role:tool message that names the call it answers. the loop
+            # ends when the model answers with no tool call at all.
+            for $k (0 .. $#results) {
+                hist('tool', $results[$k]{output}, { tool_call_id => $calls->[$k]{id} });
+            }
+        } else {
+            hist('user', results_block(\@results));
+        }
     }
     return $final;
 }
@@ -1273,6 +1509,7 @@ sub load_rc {
     close RC;
     $cfg{provider} = 'openai' if $cfg{provider} =~ /^openai/;
     $cfg{tools} = ($cfg{tools} =~ /^(?:0|off|no|false)$/i) ? 0 : 1;
+    $cfg{native_tools} = ($cfg{native_tools} =~ /^(?:0|off|no|false)$/i) ? 0 : 1;
 }
 
 sub save_rc {
@@ -1293,9 +1530,9 @@ sub save_rc {
 
 sub show_config {
     my $k;
-    for $k ('provider', 'base_url', 'model', 'approve', 'tools', 'turns', 'timeout', 'thinking', 'ascii') {
+    for $k ('provider', 'base_url', 'model', 'approve', 'tools', 'native_tools', 'turns', 'timeout', 'thinking', 'ascii') {
         my $v = $cfg{$k};
-        $v = ($v =~ /^(?:0|off|no)$/i) ? 'off' : 'on' if $k eq 'tools';
+        $v = ($v =~ /^(?:0|off|no)$/i) ? 'off' : 'on' if $k eq 'tools' || $k eq 'native_tools';
         printf("  %-9s = %s\n", $k, ((defined $v && length $v) ? $v : '(unset)'));
     }
     print "  api_key   = ", (length $cfg{api_key} ? '(set)' : '(none)'), "\n";
@@ -1330,6 +1567,9 @@ flags
   --timeout N      seconds per model call (default: no limit)
   -y               run bash commands without asking
   --no-tools       no tools, just chat
+  --no-native-tools tools via the prompt fence protocol instead of the api
+                   (the endpoint must not reject the tools parameter; if it
+                   does, oa1 falls back to the fence protocol on its own)
   --config FILE    use this rc file (default ~/.oldagentrc)
   --no-config      ignore rc files
   -q               only the answer
@@ -1359,6 +1599,7 @@ in the session:
   /provider P      ollama (native /api/chat) or openai (/v1/chat/completions)
   /approve MODE    auto (the default), ask, or off - for bash commands
   /tools [on|off]  let the model read, write, edit, list and bash
+  /native-tools    on (default) = tool calling through the api; off = the prompt fence protocol
   /models          what the endpoint serves
   /history         what is in context
   /clear           forget the conversation (also /reset)
@@ -1397,7 +1638,7 @@ sub repl {
         $line =~ s/^\s+//;
         $line =~ s/\s+$//;
         next unless length $line;
-        if ($line =~ m!^/(\w+)\s*(.*)$!) {
+        if ($line =~ m!^/([\w-]+)\s*(.*)$!) {
             ($cmd, $arg) = ($1, $2);
             last if $cmd =~ /^(?:quit|exit|q)$/;
             if    ($cmd eq 'help') { print repl_help(); print "\nsettings in use:\n"; show_config() }
@@ -1406,6 +1647,7 @@ sub repl {
             elsif ($cmd eq 'provider' && length $arg) { $cfg{provider} = $arg =~ /^openai/ ? 'openai' : 'ollama'; save_rc('provider', $cfg{provider}); print "provider = $cfg{provider}\n" }
             elsif ($cmd eq 'approve' && $arg =~ /^(ask|auto|off)$/) { $cfg{approve} = $1; print "approve = $1\n" }
             elsif ($cmd eq 'tools')   { $cfg{tools} = ($arg =~ /^(?:off|0|no)$/i) ? 0 : 1; print "tools = ", ($cfg{tools} ? 'on' : 'off'), "\n" }
+            elsif ($cmd eq 'native-tools' || $cmd eq 'nativetools') { $cfg{native_tools} = ($arg =~ /^(?:off|0|no)$/i) ? 0 : 1; $native_dead = 0; print "native_tools = ", ($cfg{native_tools} ? 'on' : 'off'), "\n" }
             elsif ($cmd eq 'clear' || $cmd eq 'reset') { @hist = (); $session_file = ''; session_begin(); print "(history cleared)", (length $session_file ? " - new session: $session_file" : ""), "\n" }
             elsif ($cmd eq 'history') { my $m; for $m (@hist) { my $t = $m->{content}; $t =~ s/\n/ /g; print "  $m->{role}: ", substr($t, 0, 70), "\n" } }
             elsif ($cmd eq 'config')  { show_config() }
@@ -1620,6 +1862,8 @@ sub main {
         elsif ($opt eq '--timeout')   { $cfg{timeout} = shift @args }
         elsif ($opt eq '-y' || $opt eq '--yes') { $cfg{approve} = 'auto' }
         elsif ($opt eq '--no-tools')  { $cfg{tools} = 0 }
+        elsif ($opt eq '--native-tools')  { $cfg{native_tools} = 1 }
+        elsif ($opt eq '--no-native-tools') { $cfg{native_tools} = 0 }
         elsif ($opt eq '-q' || $opt eq '--quiet') { $cfg{quiet} = 1 }
         elsif ($opt eq '--debug')     { $cfg{debug} = 1 }
         elsif ($opt eq '--ascii')     { $cfg{ascii} = 1 }
@@ -1674,7 +1918,11 @@ sub main {
         return defined $r ? 0 : 1;
     }
     if ($cmd eq 'do') {
+        # the one-shot task gets a transcript too: the file is the
+        # conversation, so a do run is auditable and resumable like a session.
+        session_begin();
         my $r = turn($text);
+        session_end_notice() if length $session_file && !$cfg{quiet};
         return defined $r ? 0 : 1;
     }
     repl();

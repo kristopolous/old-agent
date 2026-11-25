@@ -223,7 +223,7 @@ ok($head !~ /^use /m || index($head, "BEGIN {\n    if ($] < 5.006") < index($hea
     my ($repl_src) = do { open(my $fh, '<', $oa1) or die; local $/; <$fh> };
     my ($dispatch) = $repl_src =~ /sub repl \{(.*?)\n\}/s;
     ok($dispatch, 'found the repl dispatcher to check against');
-    my @listed = $h =~ m{^  /(\w+)}gm;
+    my @listed = $h =~ m{^  /([\w-]+)}gm;
     cmp_ok(scalar(@listed), '>=', 8, 'session /help lists the commands one per line');
     my @phantom;
     my $c;

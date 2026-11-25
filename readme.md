@@ -318,6 +318,27 @@ in the session (`--proxy off` ignores one the rc file set).
 
 ## changelog
 
+0.1.19
+- `oa1` calls tools through the api now, the way a trained model expects.
+  the request carries a `tools` array of function schemas; the answer comes
+  back as `tool_calls`; each result goes back as a `role:"tool"` message
+  naming the call it answers. this is the fix for models that never respond
+  to a protocol merely described in the prompt - they were trained on real
+  function calling, and a prompt describing one does not teach them it has
+  tools. and the loop ends the way they were trained to end it: an answer
+  with no tool call, so there is no `done` block to invent for them (the
+  fence protocol keeps its done block, that is that protocol's contract).
+  ollama's streamed `tool_calls` fragments are stitched back together (name
+  and id on the first, the arguments json split across the rest), and a
+  server that never sends an id gets one synthesized so the tool results
+  still line up. an endpoint that refuses the `tools` parameter altogether
+  (an old server, a gateway that drops unknown fields) is fought once: the
+  session then falls back to the fence protocol for its remaining turns, so
+  the one-file edition still works on anything. `/native-tools on|off`,
+  `--no-native-tools`, `native_tools = off` in the rc opt out.
+  `oa1 do` now writes a session transcript too, so a one-shot task is
+  auditable and resumable like a session.
+
 0.1.18
 - tool status is markdown now, in both editions. the call used to print as
   `[tool] bash cmd=ls`, which read as noise. it is now the tool name in bold
